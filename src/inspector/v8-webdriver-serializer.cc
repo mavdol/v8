@@ -40,12 +40,10 @@ std::unique_ptr<protocol::Value> DescriptionForDate(
     v8::Local<v8::Context> context, v8::Local<v8::Date> date) {
   v8::Isolate* isolate = context->GetIsolate();
   v8::TryCatch tryCatch(isolate);
-  v8::Local<v8::String> description;
-  bool success = date->ToString(context).ToLocal(&description);
-  DCHECK(success);
-  USE(success);
 
-  return protocol::StringValue::create(toProtocolString(isolate, description));
+  v8::Local<v8::String> dateISOString = date->ToISOString();
+  return protocol::StringValue::create(
+      toProtocolString(isolate, dateISOString));
 }
 
 String16 _descriptionForRegExpFlags(v8::Local<v8::RegExp> value) {
@@ -58,6 +56,9 @@ String16 _descriptionForRegExpFlags(v8::Local<v8::RegExp> value) {
   if (flags & v8::RegExp::Flags::kMultiline) result_string_builder.append('m');
   if (flags & v8::RegExp::Flags::kDotAll) result_string_builder.append('s');
   if (flags & v8::RegExp::Flags::kUnicode) result_string_builder.append('u');
+  if (flags & v8::RegExp::Flags::kUnicodeSets) {
+    result_string_builder.append('v');
+  }
   if (flags & v8::RegExp::Flags::kSticky) result_string_builder.append('y');
   return result_string_builder.toString();
 }

@@ -99,6 +99,13 @@ MaybeHandle<HeapObject> JSReceiver::GetPrototype(Isolate* isolate,
                                                  Handle<JSReceiver> receiver) {
   // We don't expect access checks to be needed on JSProxy objects.
   DCHECK(!receiver->IsAccessCheckNeeded() || receiver->IsJSObject());
+
+  if (receiver->IsWasmObject()) {
+    THROW_NEW_ERROR(isolate,
+                    NewTypeError(MessageTemplate::kWasmObjectsAreOpaque),
+                    HeapObject);
+  }
+
   PrototypeIterator iter(isolate, receiver, kStartAtReceiver,
                          PrototypeIterator::END_AT_NON_HIDDEN);
   do {
@@ -570,21 +577,8 @@ void JSObject::InitializeBody(Map map, int start_offset,
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(JSExternalObject)
 
-DEF_GETTER(JSExternalObject, value, void*) {
-  Isolate* isolate = GetIsolateForSandbox(*this);
-  return reinterpret_cast<void*>(
-      ReadExternalPointerField(kValueOffset, isolate, kExternalObjectValueTag));
-}
-
-void JSExternalObject::AllocateExternalPointerEntries(Isolate* isolate) {
-  InitExternalPointerField(kValueOffset, isolate, kExternalObjectValueTag);
-}
-
-void JSExternalObject::set_value(Isolate* isolate, void* value) {
-  WriteExternalPointerField(kValueOffset, isolate,
-                            reinterpret_cast<Address>(value),
-                            kExternalObjectValueTag);
-}
+EXTERNAL_POINTER_ACCESSORS(JSExternalObject, value, void*, kValueOffset,
+                           kExternalObjectValueTag)
 
 DEF_GETTER(JSGlobalObject, native_context_unchecked, Object) {
   return TaggedField<Object, kNativeContextOffset>::Relaxed_Load(cage_base,
@@ -696,6 +690,10 @@ DEF_GETTER(JSObject, HasAnyNonextensibleElements, bool) {
 
 DEF_GETTER(JSObject, HasSealedElements, bool) {
   return IsSealedElementsKind(GetElementsKind(cage_base));
+}
+
+DEF_GETTER(JSObject, HasSharedArrayElements, bool) {
+  return GetElementsKind(cage_base) == SHARED_ARRAY_ELEMENTS;
 }
 
 DEF_GETTER(JSObject, HasNonextensibleElements, bool) {
@@ -916,7 +914,7 @@ static inline bool ShouldConvertToSlowElements(JSObject object,
                                                uint32_t capacity,
                                                uint32_t index,
                                                uint32_t* new_capacity) {
-  STATIC_ASSERT(JSObject::kMaxUncheckedOldFastElementsLength <=
+  static_assert(JSObject::kMaxUncheckedOldFastElementsLength <=
                 JSObject::kMaxUncheckedFastElementsLength);
   if (index < capacity) {
     *new_capacity = capacity;

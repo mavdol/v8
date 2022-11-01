@@ -44,10 +44,6 @@ class BaselineAssembler {
   inline void DecodeField(Register reg);
 
   inline void Bind(Label* label);
-  // Binds the label without marking it as a valid jump target.
-  // This is only useful, when the position is already marked as a valid jump
-  // target (i.e. at the beginning of the bytecode).
-  inline void BindWithoutJumpTarget(Label* label);
   // Marks the current position as a valid jump target on CFI enabled
   // architectures.
   inline void JumpTarget();
@@ -157,6 +153,8 @@ class BaselineAssembler {
                                      int offset);
   inline void LoadTaggedSignedField(Register output, Register source,
                                     int offset);
+  inline void LoadTaggedSignedFieldAndUntag(Register output, Register source,
+                                            int offset);
   inline void LoadTaggedAnyField(Register output, Register source, int offset);
   inline void LoadWord16FieldZeroExtend(Register output, Register source,
                                         int offset);
@@ -169,6 +167,26 @@ class BaselineAssembler {
   inline void LoadFixedArrayElement(Register output, Register array,
                                     int32_t index);
   inline void LoadPrototype(Register prototype, Register object);
+
+// Loads compressed pointer or loads from compressed pointer. This is because
+// X64 supports complex addressing mode, pointer decompression can be done by
+// [%compressed_base + %r1 + K].
+#if V8_TARGET_ARCH_X64
+  inline void LoadTaggedPointerField(TaggedRegister output, Register source,
+                                     int offset);
+  inline void LoadTaggedPointerField(TaggedRegister output,
+                                     TaggedRegister source, int offset);
+  inline void LoadTaggedPointerField(Register output, TaggedRegister source,
+                                     int offset);
+  inline void LoadTaggedAnyField(Register output, TaggedRegister source,
+                                 int offset);
+  inline void LoadTaggedAnyField(TaggedRegister output, TaggedRegister source,
+                                 int offset);
+  inline void LoadFixedArrayElement(Register output, TaggedRegister array,
+                                    int32_t index);
+  inline void LoadFixedArrayElement(TaggedRegister output, TaggedRegister array,
+                                    int32_t index);
+#endif
 
   // Falls through and sets scratch_and_result to 0 on failure, jumps to
   // on_result on success.
@@ -183,6 +201,14 @@ class BaselineAssembler {
       int32_t weight, Label* skip_interrupt_label);
   inline void AddToInterruptBudgetAndJumpIfNotExceeded(
       Register weight, Label* skip_interrupt_label);
+
+  inline void LdaContextSlot(Register context, uint32_t index, uint32_t depth);
+  inline void StaContextSlot(Register context, Register value, uint32_t index,
+                             uint32_t depth);
+  inline void LdaModuleVariable(Register context, int cell_index,
+                                uint32_t depth);
+  inline void StaModuleVariable(Register context, Register value,
+                                int cell_index, uint32_t depth);
 
   inline void AddSmi(Register lhs, Smi rhs);
   inline void SmiUntag(Register value);

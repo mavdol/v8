@@ -52,6 +52,9 @@
 
 #if V8_OS_DARWIN
 #include <mach/mach.h>
+#include <malloc/malloc.h>
+#else
+#include <malloc.h>
 #endif
 
 #if V8_OS_LINUX
@@ -354,6 +357,10 @@ void* OS::GetRandomMmapAddr() {
   // TODO(RISCV): We need more information from the kernel to correctly mask
   // this address for RISC-V. https://github.com/v8-riscv/v8/issues/375
   raw_addr &= uint64_t{0xFFFFFF0000};
+#elif V8_TARGET_ARCH_RISCV32
+  // TODO(RISCV): We need more information from the kernel to correctly mask
+  // this address for RISC-V. https://github.com/v8-riscv/v8/issues/375
+  raw_addr &= 0x3FFFF000;
 #elif V8_TARGET_ARCH_LOONG64
   // 42 bits of virtual addressing. Truncate to 40 bits to allow kernel chance
   // to fulfill request.
@@ -506,6 +513,14 @@ bool OS::SetPermissions(void* address, size_t size, MemoryPermission access) {
 }
 
 // static
+void OS::SetDataReadOnly(void* address, size_t size) {
+  DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+  DCHECK_EQ(0, size % CommitPageSize());
+
+  CHECK_EQ(0, mprotect(address, size, PROT_READ));
+}
+
+// static
 bool OS::RecommitPages(void* address, size_t size, MemoryPermission access) {
   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
   DCHECK_EQ(0, size % CommitPageSize());
@@ -610,8 +625,9 @@ PlatformSharedMemoryHandle OS::CreateSharedMemoryHandleForTesting(size_t size) {
       reinterpret_cast<memfd_create_t>(dlsym(RTLD_DEFAULT, "memfd_create"));
   int fd = -1;
   if (memfd_create) {
-    fd = memfd_create("V8MemFDForTesting", MFD_CLOEXEC);
-  } else {
+    fd = memfd_create("V8MemFDForTesting", 0);
+  }
+  if (fd == -1) {
     char filename[] = "/tmp/v8_tmp_file_for_testing_XXXXXX";
     fd = mkstemp(filename);
     if (fd != -1) CHECK_EQ(0, unlink(filename));
@@ -683,6 +699,8 @@ void OS::DebugBreak() {
   // Software breakpoint instruction is 0x0001
   asm volatile(".word 0x0001");
 #elif V8_HOST_ARCH_RISCV64
+  asm("ebreak");
+#elif V8_HOST_ARCH_RISCV32
   asm("ebreak");
 #else
 #error Unsupported host architecture.
@@ -1061,7 +1079,7 @@ static void SetThreadName(const char* name) {
 #if V8_OS_DRAGONFLYBSD || V8_OS_FREEBSD || V8_OS_OPENBSD
   pthread_set_name_np(pthread_self(), name);
 #elif V8_OS_NETBSD
-  STATIC_ASSERT(Thread::kMaxThreadNameLength <= PTHREAD_MAX_NAMELEN_NP);
+  static_assert(Thread::kMaxThreadNameLength <= PTHREAD_MAX_NAMELEN_NP);
   pthread_setname_np(pthread_self(), "%s", name);
 #elif V8_OS_DARWIN
   // pthread_setname_np is only available in 10.6 or later, so test
@@ -1073,7 +1091,7 @@ static void SetThreadName(const char* name) {
 
   // Mac OS X does not expose the length limit of the name, so hardcode it.
   static const int kMaxNameLength = 63;
-  STATIC_ASSERT(Thread::kMaxThreadNameLength <= kMaxNameLength);
+  static_assert(Thread::kMaxThreadNameLength <= kMaxNameLength);
   dynamic_pthread_setname_np(name);
 #elif defined(PR_SET_NAME)
   prctl(PR_SET_NAME,
@@ -1139,7 +1157,7 @@ static Thread::LocalStorageKey PthreadKeyToLocalKey(pthread_key_t pthread_key) {
   // We need to cast pthread_key_t to Thread::LocalStorageKey in two steps
   // because pthread_key_t is a pointer type on Cygwin. This will probably not
   // work on 64-bit platforms, but Cygwin doesn't support 64-bit anyway.
-  STATIC_ASSERT(sizeof(Thread::LocalStorageKey) == sizeof(pthread_key_t));
+  static_assert(sizeof(Thread::LocalStorageKey) == sizeof(pthread_key_t));
   intptr_t ptr_key = reinterpret_cast<intptr_t>(pthread_key);
   return static_cast<Thread::LocalStorageKey>(ptr_key);
 #else
@@ -1150,7 +1168,7 @@ static Thread::LocalStorageKey PthreadKeyToLocalKey(pthread_key_t pthread_key) {
 
 static pthread_key_t LocalKeyToPthreadKey(Thread::LocalStorageKey local_key) {
 #if V8_OS_CYGWIN
-  STATIC_ASSERT(sizeof(Thread::LocalStorageKey) == sizeof(pthread_key_t));
+  static_assert(sizeof(Thread::LocalStorageKey) == sizeof(pthread_key_t));
   intptr_t ptr_key = static_cast<intptr_t>(local_key);
   return reinterpret_cast<pthread_key_t>(ptr_key);
 #else

@@ -9,13 +9,10 @@
 
 #include "include/v8-maybe.h"
 #include "src/base/bit-field.h"
-#include "src/base/platform/time.h"
 #include "src/common/globals.h"
 #include "src/handles/handles.h"
-#include "src/objects/elements-kind.h"
 #include "src/strings/unicode.h"
 #include "src/utils/allocation.h"
-#include "src/zone/zone.h"
 
 namespace v8 {
 namespace internal {
@@ -66,9 +63,10 @@ namespace internal {
   F(AtomicsSub, 3, 1)                                  \
   F(AtomicsXor, 3, 1)                                  \
   F(SetAllowAtomicsWait, 1, 1)                         \
-  F(AtomicsLoadSharedStructField, 2, 1)                \
-  F(AtomicsStoreSharedStructField, 3, 1)               \
-  F(AtomicsExchangeSharedStructField, 3, 1)
+  F(AtomicsLoadSharedStructOrArray, 2, 1)              \
+  F(AtomicsStoreSharedStructOrArray, 3, 1)             \
+  F(AtomicsExchangeSharedStructOrArray, 3, 1)          \
+  F(AtomicsConditionNumWaitersForTesting, 1, 1)
 
 #define FOR_EACH_INTRINSIC_BIGINT(F, I) \
   F(BigIntBinaryOp, 3, 1)               \
@@ -108,14 +106,14 @@ namespace internal {
 
 #define FOR_EACH_INTRINSIC_COMPILER(F, I) \
   F(CompileOptimizedOSR, 0, 1)            \
+  F(CompileOptimizedOSRFromMaglev, 1, 1)  \
+  F(LogOrTraceOptimizedOSREntry, 0, 1)    \
   F(CompileLazy, 1, 1)                    \
   F(CompileBaseline, 1, 1)                \
-  F(CompileMaglev_Concurrent, 1, 1)       \
-  F(CompileMaglev_Synchronous, 1, 1)      \
-  F(CompileTurbofan_Concurrent, 1, 1)     \
-  F(CompileTurbofan_Synchronous, 1, 1)    \
+  F(CompileOptimized, 1, 1)               \
   F(InstallBaselineCode, 1, 1)            \
   F(HealOptimizedCodeSlot, 1, 1)          \
+  F(FunctionLogNextExecution, 1, 1)       \
   F(InstantiateAsmJs, 4, 1)               \
   F(NotifyDeoptimized, 0, 1)              \
   F(ObserveNode, 1, 1)                    \
@@ -193,7 +191,7 @@ namespace internal {
   F(AsyncGeneratorHasCatchHandlerForPC, 1, 1) \
   I(AsyncGeneratorReject, 2, 1)               \
   I(AsyncGeneratorResolve, 3, 1)              \
-  I(AsyncGeneratorYield, 3, 1)                \
+  I(AsyncGeneratorYieldWithAwait, 3, 1)       \
   I(CreateJSGeneratorObject, 2, 1)            \
   I(GeneratorClose, 1, 1)                     \
   F(GeneratorGetFunction, 1, 1)               \
@@ -204,67 +202,73 @@ namespace internal {
   F(FormatList, 2, 1)                 \
   F(FormatListToParts, 2, 1)          \
   F(StringToLowerCaseIntl, 1, 1)      \
+  F(StringToLocaleLowerCase, 2, 1)    \
   F(StringToUpperCaseIntl, 1, 1)  // End of macro.
 #else
 #define FOR_EACH_INTRINSIC_INTL(F, I)
 #endif  // V8_INTL_SUPPORT
 
-#define FOR_EACH_INTRINSIC_INTERNAL(F, I)            \
-  F(AccessCheck, 1, 1)                               \
-  F(AllocateByteArray, 1, 1)                         \
-  F(AllocateInYoungGeneration, 2, 1)                 \
-  F(AllocateInOldGeneration, 2, 1)                   \
-  F(AllocateSeqOneByteString, 1, 1)                  \
-  F(AllocateSeqTwoByteString, 1, 1)                  \
-  F(AllowDynamicFunction, 1, 1)                      \
-  I(CreateAsyncFromSyncIterator, 1, 1)               \
-  F(CreateListFromArrayLike, 1, 1)                   \
-  F(DoubleToStringWithRadix, 2, 1)                   \
-  F(FatalProcessOutOfMemoryInAllocateRaw, 0, 1)      \
-  F(FatalProcessOutOfMemoryInvalidArrayLength, 0, 1) \
-  F(GetAndResetRuntimeCallStats, -1 /* <= 2 */, 1)   \
-  F(GetTemplateObject, 3, 1)                         \
-  F(IncrementUseCounter, 1, 1)                       \
-  F(BytecodeBudgetInterrupt, 1, 1)                   \
-  F(BytecodeBudgetInterruptWithStackCheck, 1, 1)     \
-  F(NewError, 2, 1)                                  \
-  F(NewForeign, 0, 1)                                \
-  F(NewReferenceError, 2, 1)                         \
-  F(NewSyntaxError, 2, 1)                            \
-  F(NewTypeError, -1 /* [1, 4] */, 1)                \
-  F(OrdinaryHasInstance, 2, 1)                       \
-  F(PromoteScheduledException, 0, 1)                 \
-  F(ReportMessageFromMicrotask, 1, 1)                \
-  F(ReThrow, 1, 1)                                   \
-  F(ReThrowWithMessage, 2, 1)                        \
-  F(RunMicrotaskCallback, 2, 1)                      \
-  F(PerformMicrotaskCheckpoint, 0, 1)                \
-  F(SharedValueBarrierSlow, 1, 1)                    \
-  F(StackGuard, 0, 1)                                \
-  F(StackGuardWithGap, 1, 1)                         \
-  F(Throw, 1, 1)                                     \
-  F(ThrowApplyNonFunction, 1, 1)                     \
-  F(ThrowCalledNonCallable, 1, 1)                    \
-  F(ThrowConstructedNonConstructable, 1, 1)          \
-  F(ThrowConstructorReturnedNonObject, 0, 1)         \
-  F(ThrowInvalidStringLength, 0, 1)                  \
-  F(ThrowInvalidTypedArrayAlignment, 2, 1)           \
-  F(ThrowIteratorError, 1, 1)                        \
-  F(ThrowSpreadArgError, 2, 1)                       \
-  F(ThrowIteratorResultNotAnObject, 1, 1)            \
-  F(ThrowNoAccess, 0, 1)                             \
-  F(ThrowNotConstructor, 1, 1)                       \
-  F(ThrowPatternAssignmentNonCoercible, 1, 1)        \
-  F(ThrowRangeError, -1 /* >= 1 */, 1)               \
-  F(ThrowReferenceError, 1, 1)                       \
-  F(ThrowAccessedUninitializedVariable, 1, 1)        \
-  F(ThrowStackOverflow, 0, 1)                        \
-  F(ThrowSymbolAsyncIteratorInvalid, 0, 1)           \
-  F(ThrowSymbolIteratorInvalid, 0, 1)                \
-  F(ThrowThrowMethodMissing, 0, 1)                   \
-  F(ThrowTypeError, -1 /* >= 1 */, 1)                \
-  F(ThrowTypeErrorIfStrict, -1 /* >= 1 */, 1)        \
-  F(Typeof, 1, 1)                                    \
+#define FOR_EACH_INTRINSIC_INTERNAL(F, I)                  \
+  F(AccessCheck, 1, 1)                                     \
+  F(AllocateByteArray, 1, 1)                               \
+  F(AllocateInYoungGeneration, 2, 1)                       \
+  F(AllocateInOldGeneration, 2, 1)                         \
+  F(AllocateSeqOneByteString, 1, 1)                        \
+  F(AllocateSeqTwoByteString, 1, 1)                        \
+  F(AllowDynamicFunction, 1, 1)                            \
+  I(CreateAsyncFromSyncIterator, 1, 1)                     \
+  F(CreateListFromArrayLike, 1, 1)                         \
+  F(DoubleToStringWithRadix, 2, 1)                         \
+  F(FatalProcessOutOfMemoryInAllocateRaw, 0, 1)            \
+  F(FatalProcessOutOfMemoryInvalidArrayLength, 0, 1)       \
+  F(GetAndResetRuntimeCallStats, -1 /* <= 2 */, 1)         \
+  F(GetAndResetTurboProfilingData, 0, 1)                   \
+  F(GetTemplateObject, 3, 1)                               \
+  F(IncrementUseCounter, 1, 1)                             \
+  F(BytecodeBudgetInterrupt_Ignition, 1, 1)                \
+  F(BytecodeBudgetInterruptWithStackCheck_Ignition, 1, 1)  \
+  F(BytecodeBudgetInterrupt_Sparkplug, 1, 1)               \
+  F(BytecodeBudgetInterruptWithStackCheck_Sparkplug, 1, 1) \
+  F(BytecodeBudgetInterruptWithStackCheck_Maglev, 1, 1)    \
+  F(NewError, 2, 1)                                        \
+  F(NewForeign, 0, 1)                                      \
+  F(NewReferenceError, 2, 1)                               \
+  F(NewSyntaxError, 2, 1)                                  \
+  F(NewTypeError, -1 /* [1, 4] */, 1)                      \
+  F(OrdinaryHasInstance, 2, 1)                             \
+  F(PromoteScheduledException, 0, 1)                       \
+  F(ReportMessageFromMicrotask, 1, 1)                      \
+  F(ReThrow, 1, 1)                                         \
+  F(ReThrowWithMessage, 2, 1)                              \
+  F(RunMicrotaskCallback, 2, 1)                            \
+  F(PerformMicrotaskCheckpoint, 0, 1)                      \
+  F(SharedValueBarrierSlow, 1, 1)                          \
+  F(StackGuard, 0, 1)                                      \
+  F(StackGuardWithGap, 1, 1)                               \
+  F(Throw, 1, 1)                                           \
+  F(ThrowApplyNonFunction, 1, 1)                           \
+  F(ThrowCalledNonCallable, 1, 1)                          \
+  F(ThrowConstructedNonConstructable, 1, 1)                \
+  F(ThrowConstructorReturnedNonObject, 0, 1)               \
+  F(ThrowInvalidStringLength, 0, 1)                        \
+  F(ThrowInvalidTypedArrayAlignment, 2, 1)                 \
+  F(ThrowIteratorError, 1, 1)                              \
+  F(ThrowSpreadArgError, 2, 1)                             \
+  F(ThrowIteratorResultNotAnObject, 1, 1)                  \
+  F(ThrowNoAccess, 0, 1)                                   \
+  F(ThrowNotConstructor, 1, 1)                             \
+  F(ThrowPatternAssignmentNonCoercible, 1, 1)              \
+  F(ThrowRangeError, -1 /* >= 1 */, 1)                     \
+  F(ThrowReferenceError, 1, 1)                             \
+  F(ThrowAccessedUninitializedVariable, 1, 1)              \
+  F(ThrowStackOverflow, 0, 1)                              \
+  F(ThrowSymbolAsyncIteratorInvalid, 0, 1)                 \
+  F(ThrowSymbolIteratorInvalid, 0, 1)                      \
+  F(ThrowThrowMethodMissing, 0, 1)                         \
+  F(ThrowTypeError, -1 /* >= 1 */, 1)                      \
+  F(ThrowTypeErrorIfStrict, -1 /* >= 1 */, 1)              \
+  F(TerminateExecution, 0, 1)                              \
+  F(Typeof, 1, 1)                                          \
   F(UnwindAndFindExceptionHandler, 0, 1)
 
 #define FOR_EACH_INTRINSIC_LITERALS(F, I)           \
@@ -296,7 +300,6 @@ namespace internal {
   F(AddDictionaryProperty, 3, 1)                                       \
   F(AddPrivateBrand, 4, 1)                                             \
   F(AllocateHeapNumber, 0, 1)                                          \
-  F(CollectTypeProfile, 3, 1)                                          \
   F(CompleteInobjectSlackTrackingForMap, 1, 1)                         \
   I(CopyDataProperties, 2, 1)                                          \
   I(CopyDataPropertiesWithExcludedPropertiesOnStack, -1 /* >= 1 */, 1) \
@@ -477,7 +480,10 @@ namespace internal {
   F(Abort, 1, 1)                              \
   F(AbortCSADcheck, 1, 1)                     \
   F(AbortJS, 1, 1)                            \
+  F(ActiveTierIsIgnition, 1, 1)               \
+  F(ActiveTierIsSparkplug, 1, 1)              \
   F(ActiveTierIsMaglev, 1, 1)                 \
+  F(ActiveTierIsTurbofan, 1, 1)               \
   F(ArrayIteratorProtector, 0, 1)             \
   F(ArraySpeciesProtector, 0, 1)              \
   F(BaselineOsr, -1, 1)                       \
@@ -487,7 +493,10 @@ namespace internal {
   F(CompleteInobjectSlackTracking, 1, 1)      \
   F(ConstructConsString, 2, 1)                \
   F(ConstructDouble, 2, 1)                    \
+  F(ConstructInternalizedString, 1, 1)        \
   F(ConstructSlicedString, 2, 1)              \
+  F(ConstructThinString, 1, 1)                \
+  F(CurrentFrameIsTurbofan, 0, 1)             \
   F(DebugPrint, 1, 1)                         \
   F(DebugPrintPtr, 1, 1)                      \
   F(DebugTrace, 0, 1)                         \
@@ -499,10 +508,12 @@ namespace internal {
   F(EnableCodeLoggingForTesting, 0, 1)        \
   F(EnsureFeedbackVectorForFunction, 1, 1)    \
   F(FinalizeOptimization, 0, 1)               \
+  F(ForceFlush, 1, 1)                         \
   F(GetCallable, 0, 1)                        \
   F(GetInitializerFunction, 1, 1)             \
   F(GetOptimizationStatus, 1, 1)              \
   F(GetUndetectable, 0, 1)                    \
+  F(GetWeakCollectionSize, 1, 1)              \
   F(GlobalPrint, 1, 1)                        \
   F(HasDictionaryElements, 1, 1)              \
   F(HasDoubleElements, 1, 1)                  \
@@ -538,8 +549,13 @@ namespace internal {
   F(IsConcatSpreadableProtector, 0, 1)        \
   F(IsConcurrentRecompilationSupported, 0, 1) \
   F(IsDictPropertyConstTrackingEnabled, 0, 1) \
+  F(IsInPlaceInternalizableString, 1, 1)      \
+  F(IsInternalizedString, 1, 1)               \
+  F(IsMaglevEnabled, 0, 1)                    \
   F(IsSameHeapObject, 2, 1)                   \
   F(IsSharedString, 1, 1)                     \
+  F(IsSparkplugEnabled, 0, 1)                 \
+  F(IsTurbofanEnabled, 0, 1)                  \
   F(MapIteratorProtector, 0, 1)               \
   F(NeverOptimizeFunction, 1, 1)              \
   F(NewRegExpWithBacktrackLimit, 3, 1)        \
@@ -576,7 +592,8 @@ namespace internal {
   I(DeoptimizeNow, 0, 1)
 
 #define FOR_EACH_INTRINSIC_TYPEDARRAY(F, I)    \
-  F(ArrayBufferDetach, 1, 1)                   \
+  F(ArrayBufferDetach, -1, 1)                  \
+  F(ArrayBufferSetDetachKey, 2, 1)             \
   F(GrowableSharedArrayBufferByteLength, 1, 1) \
   F(TypedArrayCopyElements, 3, 1)              \
   F(TypedArrayGetBuffer, 1, 1)                 \
@@ -584,6 +601,7 @@ namespace internal {
   F(TypedArraySortFast, 1, 1)
 
 #define FOR_EACH_INTRINSIC_WASM(F, I) \
+  F(ThrowBadSuspenderError, 0, 1)     \
   F(ThrowWasmError, 1, 1)             \
   F(ThrowWasmStackOverflow, 0, 1)     \
   F(WasmI32AtomicWait, 4, 1)          \
@@ -601,16 +619,30 @@ namespace internal {
   F(WasmTableCopy, 6, 1)              \
   F(WasmTableGrow, 3, 1)              \
   F(WasmTableFill, 5, 1)              \
-  F(WasmIsValidRefValue, 3, 1)        \
+  F(WasmJSToWasmObject, 3, 1)         \
   F(WasmCompileLazy, 2, 1)            \
+  F(WasmAllocateFeedbackVector, 3, 1) \
   F(WasmCompileWrapper, 2, 1)         \
   F(WasmTriggerTierUp, 1, 1)          \
   F(WasmDebugBreak, 0, 1)             \
   F(WasmArrayCopy, 5, 1)              \
-  F(WasmArrayInitFromData, 5, 1)      \
-  F(WasmAllocateContinuation, 1, 1)   \
+  F(WasmArrayNewSegment, 5, 1)        \
+  F(WasmAllocateSuspender, 0, 1)      \
   F(WasmSyncStackLimit, 0, 1)         \
-  F(WasmCreateResumePromise, 2, 1)
+  F(WasmCreateResumePromise, 2, 1)    \
+  F(WasmStringNewWtf8, 5, 1)          \
+  F(WasmStringNewWtf8Array, 4, 1)     \
+  F(WasmStringNewWtf16, 4, 1)         \
+  F(WasmStringNewWtf16Array, 3, 1)    \
+  F(WasmStringConst, 2, 1)            \
+  F(WasmStringMeasureUtf8, 1, 1)      \
+  F(WasmStringMeasureWtf8, 1, 1)      \
+  F(WasmStringEncodeWtf8, 5, 1)       \
+  F(WasmStringEncodeWtf16, 6, 1)      \
+  F(WasmStringEncodeWtf8Array, 4, 1)  \
+  F(WasmStringAsWtf8, 1, 1)           \
+  F(WasmStringViewWtf8Encode, 6, 1)   \
+  F(WasmStringViewWtf8Slice, 3, 1)
 
 #define FOR_EACH_INTRINSIC_WASM_TEST(F, I) \
   F(DeserializeWasmModule, 2, 1)           \
@@ -825,10 +857,9 @@ class Runtime : public AllStatic {
   // private field definition), this method throws if the field already exists
   // on object.
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
-  DefineObjectOwnProperty(
-      Isolate* isolate, Handle<Object> object, Handle<Object> key,
-      Handle<Object> value, StoreOrigin store_origin,
-      Maybe<ShouldThrow> should_throw = Nothing<ShouldThrow>());
+  DefineObjectOwnProperty(Isolate* isolate, Handle<Object> object,
+                          Handle<Object> key, Handle<Object> value,
+                          StoreOrigin store_origin);
 
   // When "receiver" is not passed, it defaults to "lookup_start_object".
   V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object>
@@ -912,6 +943,7 @@ enum class OptimizationStatus {
   kBaseline = 1 << 15,
   kTopmostFrameIsInterpreted = 1 << 16,
   kTopmostFrameIsBaseline = 1 << 17,
+  kIsLazy = 1 << 18,
 };
 
 }  // namespace internal

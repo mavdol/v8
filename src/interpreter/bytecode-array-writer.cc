@@ -9,7 +9,6 @@
 #include "src/interpreter/bytecode-jump-table.h"
 #include "src/interpreter/bytecode-label.h"
 #include "src/interpreter/bytecode-node.h"
-#include "src/interpreter/bytecode-register.h"
 #include "src/interpreter/bytecode-source-info.h"
 #include "src/interpreter/constant-array-builder.h"
 #include "src/interpreter/handler-table-builder.h"
@@ -32,7 +31,8 @@ BytecodeArrayWriter::BytecodeArrayWriter(
       last_bytecode_(Bytecode::kIllegal),
       last_bytecode_offset_(0),
       last_bytecode_had_source_info_(false),
-      elide_noneffectful_bytecodes_(FLAG_ignition_elide_noneffectful_bytecodes),
+      elide_noneffectful_bytecodes_(
+          v8_flags.ignition_elide_noneffectful_bytecodes),
       exit_seen_in_block_(false) {
   bytecodes_.reserve(512);  // Derived via experimentation.
 }

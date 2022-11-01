@@ -44,6 +44,9 @@ class Deoptimizer : public Malloced {
   };
 
   static DeoptInfo GetDeoptInfo(Code code, Address from);
+  DeoptInfo GetDeoptInfo() const {
+    return Deoptimizer::GetDeoptInfo(compiled_code_, from_);
+  }
 
   static int ComputeSourcePositionFromBytecodeArray(
       Isolate* isolate, SharedFunctionInfo shared,
@@ -76,7 +79,7 @@ class Deoptimizer : public Malloced {
   // again and any activations of the optimized code will get deoptimized when
   // execution returns. If {code} is specified then the given code is targeted
   // instead of the function code (e.g. OSR code not installed on function).
-  static void DeoptimizeFunction(JSFunction function, Code code = Code());
+  static void DeoptimizeFunction(JSFunction function, CodeT code = {});
 
   // Deoptimize all code in the given isolate.
   V8_EXPORT_PRIVATE static void DeoptimizeAll(Isolate* isolate);
@@ -91,7 +94,7 @@ class Deoptimizer : public Malloced {
   // deoptimizer, in particular the signing process, to gain control over the
   // program.
   // When building mksnapshot, always return false.
-  static bool IsValidReturnAddress(Address address);
+  static bool IsValidReturnAddress(Address pc, Isolate* isolate);
 
   ~Deoptimizer();
 
@@ -181,11 +184,11 @@ class Deoptimizer : public Malloced {
   // Tracing.
   bool tracing_enabled() const { return trace_scope_ != nullptr; }
   bool verbose_tracing_enabled() const {
-    return FLAG_trace_deopt_verbose && tracing_enabled();
+    return v8_flags.trace_deopt_verbose && tracing_enabled();
   }
   CodeTracer::Scope* trace_scope() const { return trace_scope_; }
   CodeTracer::Scope* verbose_trace_scope() const {
-    return FLAG_trace_deopt_verbose ? trace_scope() : nullptr;
+    return v8_flags.trace_deopt_verbose ? trace_scope() : nullptr;
   }
   void TraceDeoptBegin(int optimization_id, BytecodeOffset bytecode_offset);
   void TraceDeoptEnd(double deopt_duration);
@@ -194,6 +197,8 @@ class Deoptimizer : public Malloced {
 #endif
   static void TraceDeoptAll(Isolate* isolate);
   static void TraceDeoptMarked(Isolate* isolate);
+
+  bool is_restart_frame() const { return restart_frame_index_ >= 0; }
 
   Isolate* isolate_;
   JSFunction function_;
@@ -206,6 +211,7 @@ class Deoptimizer : public Malloced {
   bool deoptimizing_throw_;
   int catch_handler_data_;
   int catch_handler_pc_offset_;
+  int restart_frame_index_;
 
   // Input frame description.
   FrameDescription* input_;

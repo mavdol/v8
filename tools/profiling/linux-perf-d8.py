@@ -4,34 +4,46 @@
 # found in the LICENSE file.
 
 from datetime import datetime
-from pathlib import Path
+from datetime import timedelta
 import optparse
 import os
-import psutil
+from pathlib import Path
 import shlex
+import shutil
 import signal
 import subprocess
+import sys
 import time
+
+import psutil
 
 # ==============================================================================
 
-usage = """Usage: %prog $D8_BIN [OPTION]... -- [D8_OPTION]... [FILE]
+usage = """Usage: %prog [OPTION]... $D8_BIN [D8_OPTION]... [FILE]
 
 This script runs linux-perf with custom V8 logging to get support to resolve
 JS function names.
 
 The perf data is written to OUT_DIR separate by renderer process.
 
-See http://v8.dev//linux-perf for more detailed instructions.
-See $D8_BIN --help for more options
+See https://v8.dev/docs/linux-perf for more detailed instructions.
+See $D8_BIN --help for more flags/options
 """
 parser = optparse.OptionParser(usage=usage)
+# Stop parsing options after D8_BIN
+parser.disable_interspersed_args()
+
 parser.add_option(
     '--perf-data-dir',
     default=None,
     metavar="OUT_DIR",
     help="Output directory for linux perf profile files")
 parser.add_option("--timeout", type=float, help="Stop d8 after N seconds")
+parser.add_option(
+    "--skip-pprof",
+    action="store_true",
+    default=False,
+    help="Skip pprof upload (relevant for Googlers only)")
 
 d8_options = optparse.OptionGroup(
     parser, "d8-forwarded Options",
@@ -103,7 +115,7 @@ if options.perf_data_dir is None:
   options.perf_data_dir = Path.cwd()
 else:
   options.perf_data_dir = Path(options.perf_data_dir).absolute()
-
+options.perf_data_dir.mkdir(parents=True, exist_ok=True)
 if not options.perf_data_dir.is_dir():
   parser.error(f"--perf-data-dir={options.perf_data_dir} "
                "is not an directory or does not exist.")
@@ -166,8 +178,11 @@ log("LINUX PERF CMD: ", shlex.join(cmd))
 
 
 def wait_for_process_timeout(process):
-  sleeping_time = 0
-  while (sleeping_time < options.timeout):
+  delta = timedelta(seconds=options.timeout)
+  start_time = datetime.now()
+  while True:
+    if (datetime.now() - start_time) >= delta:
+      return False
     processHasStopped = process.poll() is not None
     if processHasStopped:
       return True
@@ -205,12 +220,11 @@ else:
 # ==============================================================================
 log("POST PROCESSING: Injecting JS symbols")
 
-
 def inject_v8_symbols(perf_dat_file):
   output_file = perf_dat_file.with_suffix(".data.jitted")
   cmd = [
-      "perf", "inject", "--jit", f"--input={perf_dat_file}",
-      f"--output={output_file}"
+      "perf", "inject", "--jit", f"--input={perf_dat_file.absolute()}",
+      f"--output={output_file.absolute()}"
   ]
   try:
     subprocess.check_call(cmd)
@@ -220,15 +234,40 @@ def inject_v8_symbols(perf_dat_file):
     return None
   return output_file
 
-
 result = inject_v8_symbols(perf_data_file)
 if result is None:
   print("No perf files were successfully processed"
-        " Check for errors or partial results in '{options.perf_data_dir}'")
+        f" Check for errors or partial results in '{options.perf_data_dir}'")
   exit(1)
 log(f"RESULTS in '{options.perf_data_dir}'")
 BYTES_TO_MIB = 1 / 1024 / 1024
 print(f"{result.name:67}{(result.stat().st_size*BYTES_TO_MIB):10.2f}MiB")
 
+# ==============================================================================
+if not shutil.which('gcertstatus') or options.skip_pprof:
+  log("ANALYSIS")
+  print(f"perf report --input='{result}'")
+  print(f"pprof '{result}'")
+  exit(0)
+
 log("PPROF")
-print(f"pprof -flame {result}")
+has_gcert = False
+try:
+  print("# Checking gcert status for googlers")
+  subprocess.check_call("gcertstatus >&/dev/null || gcert", shell=True)
+  has_gcert = True
+
+  cmd = [
+      "pprof", "-flame", f"-add_comment={shlex.join(sys.argv)}",
+      str(result.absolute())
+  ]
+  print("# Processing and uploading to pprofresult")
+  url = subprocess.check_output(cmd).decode('utf-8').strip()
+  print(url)
+except subprocess.CalledProcessError as e:
+  if has_gcert:
+    raise Exception("Could not generate pprof results") from e
+  print("# Please run `gcert` for generating pprof results")
+  print(f"pprof -flame {result}")
+except KeyboardInterrupt:
+  exit(1)

@@ -65,9 +65,7 @@ class Arguments {
 
   V8_INLINE double number_value_at(int index) const;
 
-  V8_INLINE FullObjectSlot slot_at(int index) const {
-    return FullObjectSlot(address_of_arg_at(index));
-  }
+  V8_INLINE Handle<Object> atOrUndefined(Isolate* isolate, int index) const;
 
   V8_INLINE Address* address_of_arg_at(int index) const {
     DCHECK_LE(static_cast<uint32_t>(index), static_cast<uint32_t>(length_));
@@ -81,19 +79,6 @@ class Arguments {
 
   // Get the total number of arguments including the receiver.
   V8_INLINE int length() const { return static_cast<int>(length_); }
-
-  // Arguments on the stack are in reverse order (compared to an array).
-  FullObjectSlot first_slot() const {
-    int index = length() - 1;
-    if (arguments_type == ArgumentsType::kJS) index = 0;
-    return slot_at(index);
-  }
-
-  FullObjectSlot last_slot() const {
-    int index = 0;
-    if (arguments_type == ArgumentsType::kJS) index = length() - 1;
-    return slot_at(index);
-  }
 
  private:
   intptr_t length_;

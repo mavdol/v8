@@ -2,29 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/ast/prettyprinter.h"
 #include "src/base/macros.h"
 #include "src/builtins/builtins.h"
 #include "src/common/globals.h"
 #include "src/common/message-template.h"
-#include "src/debug/debug.h"
 #include "src/execution/arguments-inl.h"
 #include "src/execution/frames.h"
 #include "src/execution/isolate-inl.h"
 #include "src/execution/messages.h"
 #include "src/handles/maybe-handles.h"
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
-#include "src/heap/memory-chunk.h"
-#include "src/init/bootstrapper.h"
-#include "src/logging/counters.h"
-#include "src/objects/hash-table-inl.h"
-#include "src/objects/js-array-inl.h"
 #include "src/objects/map-updater.h"
 #include "src/objects/property-descriptor-object.h"
 #include "src/objects/property-descriptor.h"
 #include "src/objects/property-details.h"
 #include "src/objects/swiss-name-dictionary-inl.h"
-#include "src/runtime/runtime-utils.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
@@ -48,6 +40,9 @@ MaybeHandle<Object> Runtime::GetObjectProperty(
       LookupIterator(isolate, receiver, lookup_key, lookup_start_object);
 
   MaybeHandle<Object> result = Object::GetProperty(&it);
+  if (result.is_null()) {
+    return result;
+  }
   if (is_found) *is_found = it.IsFound();
 
   if (!it.IsFound() && key->IsSymbol() &&
@@ -522,6 +517,7 @@ RUNTIME_FUNCTION(Runtime_ObjectCreate) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewTypeError(MessageTemplate::kProtoObjectOrNull, prototype));
   }
+
   // 2. Let obj be ObjectCreate(O).
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, obj, JSObject::ObjectCreate(isolate, prototype));
@@ -564,15 +560,12 @@ MaybeHandle<Object> Runtime::SetObjectProperty(
   PropertyKey lookup_key(isolate, key, &success);
   if (!success) return MaybeHandle<Object>();
   LookupIterator it(isolate, object, lookup_key);
-
-  if (!it.IsFound() && key->IsSymbol() &&
-      Symbol::cast(*key).is_private_name()) {
-    Handle<Object> name_string(Symbol::cast(*key).description(), isolate);
-    DCHECK(name_string->IsString());
-    THROW_NEW_ERROR(isolate,
-                    NewTypeError(MessageTemplate::kInvalidPrivateMemberWrite,
-                                 name_string, object),
-                    Object);
+  if (key->IsSymbol() && Symbol::cast(*key).is_private_name()) {
+    Maybe<bool> can_store = JSReceiver::CheckPrivateNameStore(&it, false);
+    MAYBE_RETURN_NULL(can_store);
+    if (!can_store.FromJust()) {
+      return isolate->factory()->undefined_value();
+    }
   }
 
   MAYBE_RETURN_NULL(
@@ -581,10 +574,11 @@ MaybeHandle<Object> Runtime::SetObjectProperty(
   return value;
 }
 
-MaybeHandle<Object> Runtime::DefineObjectOwnProperty(
-    Isolate* isolate, Handle<Object> object, Handle<Object> key,
-    Handle<Object> value, StoreOrigin store_origin,
-    Maybe<ShouldThrow> should_throw) {
+MaybeHandle<Object> Runtime::DefineObjectOwnProperty(Isolate* isolate,
+                                                     Handle<Object> object,
+                                                     Handle<Object> key,
+                                                     Handle<Object> value,
+                                                     StoreOrigin store_origin) {
   if (object->IsNullOrUndefined(isolate)) {
     THROW_NEW_ERROR(
         isolate,
@@ -599,20 +593,20 @@ MaybeHandle<Object> Runtime::DefineObjectOwnProperty(
   LookupIterator it(isolate, object, lookup_key, LookupIterator::OWN);
 
   if (key->IsSymbol() && Symbol::cast(*key).is_private_name()) {
-    Handle<Symbol> private_symbol = Handle<Symbol>::cast(key);
-    if (it.IsFound()) {
-      Handle<Object> name_string(private_symbol->description(), isolate);
-      DCHECK(name_string->IsString());
-      MessageTemplate message =
-          private_symbol->is_private_brand()
-              ? MessageTemplate::kInvalidPrivateBrandReinitialization
-              : MessageTemplate::kInvalidPrivateFieldReinitialization;
-      THROW_NEW_ERROR(isolate, NewTypeError(message, name_string), Object);
-    } else {
-      MAYBE_RETURN_NULL(JSReceiver::AddPrivateField(&it, value, should_throw));
+    Maybe<bool> can_store = JSReceiver::CheckPrivateNameStore(&it, true);
+    MAYBE_RETURN_NULL(can_store);
+    // If the state is ACCESS_CHECK, the faliled access check callback
+    // is configured but it did't throw.
+    DCHECK_IMPLIES(it.IsFound(), it.state() == LookupIterator::ACCESS_CHECK &&
+                                     !can_store.FromJust());
+    if (!can_store.FromJust()) {
+      return isolate->factory()->undefined_value();
     }
+    MAYBE_RETURN_NULL(
+        JSReceiver::AddPrivateField(&it, value, Nothing<ShouldThrow>()));
   } else {
-    MAYBE_RETURN_NULL(JSReceiver::CreateDataProperty(&it, value, should_throw));
+    MAYBE_RETURN_NULL(
+        JSReceiver::CreateDataProperty(&it, value, Nothing<ShouldThrow>()));
   }
 
   return value;
@@ -1059,7 +1053,8 @@ RUNTIME_FUNCTION(Runtime_GetDerivedMap) {
   Handle<JSReceiver> new_target = args.at<JSReceiver>(1);
   Handle<Object> rab_gsab = args.at(2);
   if (rab_gsab->IsTrue()) {
-    return *JSFunction::GetDerivedRabGsabMap(isolate, target, new_target);
+    RETURN_RESULT_OR_FAILURE(
+        isolate, JSFunction::GetDerivedRabGsabMap(isolate, target, new_target));
   } else {
     RETURN_RESULT_OR_FAILURE(
         isolate, JSFunction::GetDerivedMap(isolate, target, new_target));
@@ -1178,35 +1173,6 @@ RUNTIME_FUNCTION(Runtime_DefineKeyedOwnPropertyInLiteral) {
   // BaselineCompiler::VisitDefineKeyedOwnPropertyInLiteral doesn't have to
   // save the accumulator.
   return *value;
-}
-
-RUNTIME_FUNCTION(Runtime_CollectTypeProfile) {
-  HandleScope scope(isolate);
-  DCHECK_EQ(3, args.length());
-  int position = args.smi_value_at(0);
-  Handle<Object> value = args.at(1);
-  Handle<HeapObject> maybe_vector = args.at<HeapObject>(2);
-
-  if (maybe_vector->IsUndefined()) {
-    return ReadOnlyRoots(isolate).undefined_value();
-  }
-  Handle<FeedbackVector> vector = args.at<FeedbackVector>(2);
-
-  Handle<String> type = Object::TypeOf(isolate, value);
-  if (value->IsJSReceiver()) {
-    Handle<JSReceiver> object = Handle<JSReceiver>::cast(value);
-    type = JSReceiver::GetConstructorName(isolate, object);
-  } else if (value->IsNull(isolate)) {
-    // typeof(null) is object. But it's more user-friendly to annotate
-    // null as type "null".
-    type = Handle<String>(ReadOnlyRoots(isolate).null_string(), isolate);
-  }
-
-  DCHECK(vector->metadata().HasTypeProfileSlot());
-  FeedbackNexus nexus(vector, vector->GetTypeProfileSlot());
-  nexus.Collect(type, position);
-
-  return ReadOnlyRoots(isolate).undefined_value();
 }
 
 RUNTIME_FUNCTION(Runtime_HasFastPackedElements) {

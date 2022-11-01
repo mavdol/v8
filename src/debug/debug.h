@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "src/base/enum-set.h"
+#include "src/base/platform/elapsed-timer.h"
 #include "src/codegen/source-position-table.h"
 #include "src/common/globals.h"
 #include "src/debug/debug-interface.h"
@@ -148,12 +149,12 @@ class V8_EXPORT_PRIVATE BreakIterator {
   void ClearDebugBreak();
   void SetDebugBreak();
 
+  DebugBreakType GetDebugBreakType();
+
  private:
   int BreakIndexFromPosition(int position);
 
   Isolate* isolate();
-
-  DebugBreakType GetDebugBreakType();
 
   Handle<DebugInfo> debug_info_;
   int break_index_;
@@ -330,7 +331,8 @@ class V8_EXPORT_PRIVATE Debug {
   // change. stack_changed is true if after editing script on pause stack is
   // changed and client should request stack trace again.
   bool SetScriptSource(Handle<Script> script, Handle<String> source,
-                       bool preview, debug::LiveEditResult* result);
+                       bool preview, bool allow_top_frame_live_editing,
+                       debug::LiveEditResult* result);
 
   int GetFunctionDebuggingId(Handle<JSFunction> function);
 
@@ -394,8 +396,22 @@ class V8_EXPORT_PRIVATE Debug {
     return thread_local_.break_on_next_function_call_;
   }
 
-  bool ShouldRestartFrame() const {
+  bool scheduled_break_on_function_call() const {
+    return thread_local_.scheduled_break_on_next_function_call_;
+  }
+
+  bool IsRestartFrameScheduled() const {
     return thread_local_.restart_frame_id_ != StackFrameId::NO_ID;
+  }
+  bool ShouldRestartFrame(StackFrameId id) const {
+    return IsRestartFrameScheduled() && thread_local_.restart_frame_id_ == id;
+  }
+  void clear_restart_frame() {
+    thread_local_.restart_frame_id_ = StackFrameId::NO_ID;
+    thread_local_.restart_inline_frame_index_ = -1;
+  }
+  int restart_inline_frame_index() const {
+    return thread_local_.restart_inline_frame_index_;
   }
 
   inline bool break_disabled() const { return break_disabled_; }
@@ -410,6 +426,9 @@ class V8_EXPORT_PRIVATE Debug {
   static const int kInstrumentationId = -1;
 
   void RemoveBreakInfoAndMaybeFree(Handle<DebugInfo> debug_info);
+
+  // Stops the timer for the top-most `DebugScope` and records a UMA event.
+  void NotifyDebuggerPausedEventSent();
 
   static char* Iterate(RootVisitor* v, char* thread_storage);
 
@@ -573,6 +592,11 @@ class V8_EXPORT_PRIVATE Debug {
     // debugger to break on next function call.
     bool break_on_next_function_call_;
 
+    // This flag is true when we break via stack check (BreakReason::kScheduled)
+    // We don't stay paused there but instead "step in" to the function similar
+    // to what "BreakOnNextFunctionCall" does.
+    bool scheduled_break_on_next_function_call_;
+
     // Throwing an exception may cause a Promise rejection.  For this purpose
     // we keep track of a stack of nested promises.
     Object promise_stack_;
@@ -621,6 +645,8 @@ class V8_NODISCARD DebugScope {
 
   void set_terminate_on_resume();
 
+  base::TimeDelta ElapsedTimeSinceCreation();
+
  private:
   Isolate* isolate() { return debug_->isolate_; }
 
@@ -630,6 +656,10 @@ class V8_NODISCARD DebugScope {
   PostponeInterruptsScope no_interrupts_;
   // This is used as a boolean.
   bool terminate_on_resume_ = false;
+
+  // Measures (for UMA) the duration beginning when we enter this `DebugScope`
+  // until we potentially send a "Debugger.paused" response in the inspector.
+  base::ElapsedTimer timer_;
 };
 
 // This scope is used to handle return values in nested debug break points.

@@ -78,13 +78,13 @@ Handle<Object> HeapTester::TestAllocateAfterFailures() {
   heap->CreateFillerObjectAt(obj.address(), size);
 
   // Map space.
-  heap::SimulateFullSpace(heap->space_for_maps());
+  heap::SimulateFullSpace(heap->old_space());
   obj = heap->AllocateRaw(Map::kSize, AllocationType::kMap).ToObjectChecked();
   heap->CreateFillerObjectAt(obj.address(), Map::kSize);
 
   // Code space.
   heap::SimulateFullSpace(heap->code_space());
-  CodePageCollectionMemoryModificationScope code_scope(heap);
+  CodePageCollectionMemoryModificationScopeForTesting code_scope(heap);
   size = CcTest::i_isolate()->builtins()->code(Builtin::kIllegal).Size();
   obj =
       heap->AllocateRaw(size, AllocationType::kCode, AllocationOrigin::kRuntime)
@@ -96,7 +96,7 @@ Handle<Object> HeapTester::TestAllocateAfterFailures() {
 
 HEAP_TEST(StressHandles) {
   // For TestAllocateAfterFailures.
-  FLAG_stress_concurrent_allocation = false;
+  v8_flags.stress_concurrent_allocation = false;
   v8::HandleScope scope(CcTest::isolate());
   v8::Local<v8::Context> env = v8::Context::New(CcTest::isolate());
   env->Enter();
@@ -130,7 +130,7 @@ Handle<AccessorInfo> TestAccessorInfo(
 
 TEST(StressJS) {
   // For TestAllocateAfterFailures in TestGetter.
-  FLAG_stress_concurrent_allocation = false;
+  v8_flags.stress_concurrent_allocation = false;
   Isolate* isolate = CcTest::i_isolate();
   Factory* factory = isolate->factory();
   v8::HandleScope scope(CcTest::isolate());

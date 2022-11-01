@@ -6,7 +6,6 @@
 #define V8_INTERPRETER_BYTECODE_ARRAY_BUILDER_H_
 
 #include "src/ast/ast.h"
-#include "src/base/compiler-specific.h"
 #include "src/base/export-template.h"
 #include "src/common/globals.h"
 #include "src/interpreter/bytecode-array-writer.h"
@@ -17,7 +16,6 @@
 #include "src/interpreter/bytecodes.h"
 #include "src/interpreter/constant-array-builder.h"
 #include "src/interpreter/handler-table-builder.h"
-#include "src/zone/zone-containers.h"
 
 namespace v8 {
 namespace internal {
@@ -159,10 +157,6 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
   BytecodeArrayBuilder& DefineKeyedOwnPropertyInLiteral(
       Register object, Register name,
       DefineKeyedOwnPropertyInLiteralFlags flags, int feedback_slot);
-
-  // Collect type information for developer tools. The value for which we
-  // record the type is stored in the accumulator.
-  BytecodeArrayBuilder& CollectTypeProfile(int position);
 
   // Set a property named by a property name, trigger the setters and
   // set traps if necessary. The value to be set should be in the
@@ -388,6 +382,9 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
   // throws a TypeError exception.
   BytecodeArrayBuilder& GetSuperConstructor(Register out);
 
+  BytecodeArrayBuilder& FindNonDefaultConstructorOrConstruct(
+      Register this_function, Register new_target, RegisterList output);
+
   // Deletes property from an object. This expects that accumulator contains
   // the key to be deleted and the register contains a reference to the object.
   BytecodeArrayBuilder& Delete(Register object, LanguageMode language_mode);
@@ -492,6 +489,10 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
   // constant pool.
   BytecodeJumpTable* AllocateJumpTable(int size, int case_value_base);
 
+  BytecodeRegisterOptimizer* GetRegisterOptimizer() {
+    return register_optimizer_;
+  }
+
   // Gets a constant pool entry.
   size_t GetConstantPoolEntry(const AstRawString* raw_string);
   size_t GetConstantPoolEntry(AstBigInt bigint);
@@ -512,7 +513,11 @@ class V8_EXPORT_PRIVATE BytecodeArrayBuilder final {
     SetStatementPosition(stmt->position());
   }
 
-  BytecodeSourceInfo PopSourcePosition() {
+  base::Optional<BytecodeSourceInfo> MaybePopSourcePosition(int scope_start) {
+    if (!latest_source_info_.is_valid() ||
+        latest_source_info_.source_position() < scope_start) {
+      return base::nullopt;
+    }
     BytecodeSourceInfo source_info = latest_source_info_;
     latest_source_info_.set_invalid();
     return source_info;

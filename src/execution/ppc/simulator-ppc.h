@@ -21,7 +21,6 @@
 #include "src/base/hashmap.h"
 #include "src/base/lazy-instance.h"
 #include "src/base/platform/mutex.h"
-#include "src/base/platform/wrappers.h"
 #include "src/codegen/assembler.h"
 #include "src/codegen/ppc/constants-ppc.h"
 #include "src/execution/simulator-base.h"
@@ -328,8 +327,8 @@ class Simulator : public SimulatorBase {
       __uint128_t u128;
     } res, val;
     val.u128 = v;
-    res.u64[0] = __builtin_bswap64(val.u64[1]);
-    res.u64[1] = __builtin_bswap64(val.u64[0]);
+    res.u64[0] = ByteReverse<int64_t>(val.u64[1]);
+    res.u64[1] = ByteReverse<int64_t>(val.u64[0]);
     return res.u128;
   }
 

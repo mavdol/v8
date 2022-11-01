@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Copyright 2012 the V8 project authors. All rights reserved.
 # Redistribution and use in source and binary forms, with or without
@@ -337,7 +337,6 @@ class LogReader(object):
   _ARCH_TO_POINTER_TYPE_MAP = {
     "ia32": ctypes.c_uint32,
     "arm": ctypes.c_uint32,
-    "mips": ctypes.c_uint32,
     "x64": ctypes.c_uint64,
     "arm64": ctypes.c_uint64
   }

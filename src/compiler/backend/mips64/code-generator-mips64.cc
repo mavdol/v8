@@ -4,6 +4,7 @@
 
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/callable.h"
+#include "src/codegen/machine-type.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/codegen/mips64/constants-mips64.h"
 #include "src/codegen/optimized-compilation-info.h"
@@ -90,9 +91,6 @@ class MipsOperandConverter final : public InstructionOperandConverter {
         // TODO(plind): Maybe we should handle ExtRef & HeapObj here?
         //    maybe not done on arm due to const pool ??
         break;
-      case Constant::kDelayedStringConstant:
-        return Operand::EmbeddedStringConstant(
-            constant.ToDelayedStringConstant());
       case Constant::kRpoNumber:
         UNREACHABLE();  // TODO(titzer): RPO immediates on mips?
     }
@@ -164,15 +162,11 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
   }
 
   void Generate() final {
-    __ CheckPageFlag(value_, scratch0_,
-                     MemoryChunk::kPointersToHereAreInterestingMask, eq,
-                     exit());
+    __ CheckPageFlag(
+        value_, scratch0_,
+        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
+        exit());
     __ Daddu(scratch1_, object_, index_);
-    RememberedSetAction const remembered_set_action =
-        mode_ > RecordWriteMode::kValueIsMap ||
-                FLAG_use_full_record_write_builtin
-            ? RememberedSetAction::kEmit
-            : RememberedSetAction::kOmit;
     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
                                             ? SaveFPRegsMode::kSave
                                             : SaveFPRegsMode::kIgnore;
@@ -187,13 +181,11 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
       // A direct call to a wasm runtime stub defined in this module.
       // Just encode the stub index. This will be patched when the code
       // is added to the native module and copied into wasm code space.
-      __ CallRecordWriteStubSaveRegisters(object_, scratch1_,
-                                          remembered_set_action, save_fp_mode,
+      __ CallRecordWriteStubSaveRegisters(object_, scratch1_, save_fp_mode,
                                           StubCallMode::kCallWasmRuntimeStub);
 #endif  // V8_ENABLE_WEBASSEMBLY
     } else {
-      __ CallRecordWriteStubSaveRegisters(object_, scratch1_,
-                                          remembered_set_action, save_fp_mode);
+      __ CallRecordWriteStubSaveRegisters(object_, scratch1_, save_fp_mode);
     }
     if (must_save_lr_) {
       __ Pop(ra);
@@ -654,7 +646,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kArchCallJSFunction: {
       Register func = i.InputRegister(0);
-      if (FLAG_debug_code) {
+      if (v8_flags.debug_code) {
         // Check the function's context matches the context argument.
         __ Ld(kScratchReg, FieldMemOperand(func, JSFunction::kContextOffset));
         __ Assert(eq, AbortReason::kWrongFunctionContext, cp,
@@ -716,7 +708,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       int offset = __ root_array_available() ? 64 : 112;
 #endif  // V8_ENABLE_WEBASSEMBLY
 #if V8_HOST_ARCH_MIPS64
-      if (FLAG_debug_code) {
+      if (v8_flags.debug_code) {
         offset += 16;
       }
 #endif
@@ -865,7 +857,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
           frame_access_state()->GetFrameOffset(i.InputInt32(0));
       Register base_reg = offset.from_stack_pointer() ? sp : fp;
       __ Daddu(i.OutputRegister(), base_reg, Operand(offset.offset()));
-      if (FLAG_debug_code) {
+      if (v8_flags.debug_code) {
         // Verify that the output_register is properly aligned
         __ And(kScratchReg, i.OutputRegister(),
                Operand(kSystemPointerSize - 1));
@@ -964,6 +956,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ MulOverflow(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1),
                      kScratchReg);
       break;
+    case kMips64DMulOvf:
+      __ DMulOverflow(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1),
+                      kScratchReg);
+      break;
     case kMips64MulHigh:
       __ Mulh(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
       break;
@@ -972,6 +968,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kMips64DMulHigh:
       __ Dmulh(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
+      break;
+    case kMips64DMulHighU:
+      __ Dmulhu(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
       break;
     case kMips64Div:
       __ Div(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
@@ -1468,6 +1467,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // Other arches use round to zero here, so we follow.
       __ trunc_w_d(scratch, i.InputDoubleRegister(0));
       __ mfc1(i.OutputRegister(), scratch);
+      if (instr->OutputCount() > 1) {
+        // Check for inputs below INT32_MIN and NaN.
+        __ li(i.OutputRegister(1), 1);
+        __ Move(i.TempDoubleRegister(0), static_cast<double>(INT32_MIN));
+        __ CompareF64(LE, i.TempDoubleRegister(0), i.InputDoubleRegister(0));
+        __ LoadZeroIfNotFPUCondition(i.OutputRegister(1));
+        __ Move(i.TempDoubleRegister(0), static_cast<double>(INT32_MAX) + 1);
+        __ CompareF64(LE, i.TempDoubleRegister(0), i.InputDoubleRegister(0));
+        __ LoadZeroIfFPUCondition(i.OutputRegister(1));
+      }
       break;
     }
     case kMips64FloorWS: {
@@ -1552,6 +1561,15 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kMips64TruncUwD: {
       FPURegister scratch = kScratchDoubleReg;
       __ Trunc_uw_d(i.OutputRegister(), i.InputDoubleRegister(0), scratch);
+      if (instr->OutputCount() > 1) {
+        __ li(i.OutputRegister(1), 1);
+        __ Move(i.TempDoubleRegister(0), static_cast<double>(-1.0));
+        __ CompareF64(LT, i.TempDoubleRegister(0), i.InputDoubleRegister(0));
+        __ LoadZeroIfNotFPUCondition(i.OutputRegister(1));
+        __ Move(i.TempDoubleRegister(0), static_cast<double>(UINT32_MAX) + 1);
+        __ CompareF64(LE, i.TempDoubleRegister(0), i.InputDoubleRegister(0));
+        __ LoadZeroIfFPUCondition(i.OutputRegister(1));
+      }
       break;
     }
     case kMips64TruncUwS: {
@@ -3415,7 +3433,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       if (src0 == src1) {
         // Unary S32x4 shuffles are handled with shf.w instruction
         unsigned lane = shuffle & 0xFF;
-        if (FLAG_debug_code) {
+        if (v8_flags.debug_code) {
           // range of all four lanes, for unary instruction,
           // should belong to the same range, which can be one of these:
           // [0, 3] or [4, 7]
@@ -3814,7 +3832,8 @@ void AssembleBranchToLabels(CodeGenerator* gen, TurboAssembler* tasm,
       default:
         UNSUPPORTED_COND(instr->arch_opcode(), condition);
     }
-  } else if (instr->arch_opcode() == kMips64MulOvf) {
+  } else if (instr->arch_opcode() == kMips64MulOvf ||
+             instr->arch_opcode() == kMips64DMulOvf) {
     // Overflow occurs if overflow register is not zero
     switch (condition) {
       case kOverflow:
@@ -3824,7 +3843,7 @@ void AssembleBranchToLabels(CodeGenerator* gen, TurboAssembler* tasm,
         __ Branch(tlabel, eq, kScratchReg, Operand(zero_reg));
         break;
       default:
-        UNSUPPORTED_COND(kMipsMulOvf, condition);
+        UNSUPPORTED_COND(instr->arch_opcode(), condition);
     }
   } else if (instr->arch_opcode() == kMips64Cmp) {
     Condition cc = FlagsConditionToConditionCmp(condition);
@@ -3915,7 +3934,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
         ReferenceMap* reference_map =
             gen_->zone()->New<ReferenceMap>(gen_->zone());
         gen_->RecordSafepoint(reference_map);
-        if (FLAG_debug_code) {
+        if (v8_flags.debug_code) {
           __ stop();
         }
       }
@@ -3964,7 +3983,8 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
              instr->arch_opcode() == kMips64DsubOvf) {
     // Overflow occurs if overflow register is negative
     __ slt(result, kScratchReg, zero_reg);
-  } else if (instr->arch_opcode() == kMips64MulOvf) {
+  } else if (instr->arch_opcode() == kMips64MulOvf ||
+             instr->arch_opcode() == kMips64MulOvf) {
     // Overflow occurs if overflow register is not zero
     __ Sgtu(result, kScratchReg, zero_reg);
   } else if (instr->arch_opcode() == kMips64Cmp) {
@@ -4211,7 +4231,7 @@ void CodeGenerator::AssembleConstructFrame() {
       // If the frame is bigger than the stack, we throw the stack overflow
       // exception unconditionally. Thereby we can avoid the integer overflow
       // check in the condition code.
-      if (required_slots * kSystemPointerSize < FLAG_stack_size * KB) {
+      if (required_slots * kSystemPointerSize < v8_flags.stack_size * KB) {
         __ Ld(
              kScratchReg,
              FieldMemOperand(kWasmInstanceRegister,
@@ -4227,7 +4247,7 @@ void CodeGenerator::AssembleConstructFrame() {
       // define an empty safepoint.
       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
       RecordSafepoint(reference_map);
-      if (FLAG_debug_code) __ stop();
+      if (v8_flags.debug_code) __ stop();
 
       __ bind(&done);
     }
@@ -4291,7 +4311,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
   if (parameter_slots != 0) {
     if (additional_pop_count->IsImmediate()) {
       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
-    } else if (FLAG_debug_code) {
+    } else if (v8_flags.debug_code) {
       __ Assert(eq, AbortReason::kUnexpectedAdditionalPopValue,
                 g.ToRegister(additional_pop_count),
                 Operand(static_cast<int64_t>(0)));
@@ -4351,6 +4371,121 @@ void CodeGenerator::FinishCode() {}
 void CodeGenerator::PrepareForDeoptimizationExits(
     ZoneDeque<DeoptimizationExit*>* exits) {}
 
+void CodeGenerator::MoveToTempLocation(InstructionOperand* source) {
+  // Must be kept in sync with {MoveTempLocationTo}.
+  DCHECK(!source->IsImmediate());
+  auto rep = LocationOperand::cast(source)->representation();
+  move_cycle_.temps.emplace(tasm());
+  auto& temps = *move_cycle_.temps;
+  // Temporarily exclude the reserved scratch registers while we pick one to
+  // resolve the move cycle. Re-include them immediately afterwards as they
+  // might be needed for the move to the temp location.
+  temps.Exclude(move_cycle_.scratch_regs);
+  if (!IsFloatingPoint(rep)) {
+    if (temps.hasAvailable()) {
+      Register scratch = move_cycle_.temps->Acquire();
+      move_cycle_.scratch_reg.emplace(scratch);
+    }
+  }
+
+  temps.Include(move_cycle_.scratch_regs);
+
+  if (move_cycle_.scratch_reg.has_value()) {
+    // A scratch register is available for this rep.
+    // auto& scratch_reg = *move_cycle_.scratch_reg;
+    AllocatedOperand scratch(LocationOperand::REGISTER, rep,
+                             move_cycle_.scratch_reg->code());
+    AssembleMove(source, &scratch);
+  } else {
+    // The scratch registers are blocked by pending moves. Use the stack
+    // instead.
+    int new_slots = ElementSizeInPointers(rep);
+    MipsOperandConverter g(this, nullptr);
+    if (source->IsRegister()) {
+      __ Push(g.ToRegister(source));
+    } else if (source->IsStackSlot()) {
+      UseScratchRegisterScope temps2(tasm());
+      Register scratch = temps2.Acquire();
+      __ Ld(scratch, g.ToMemOperand(source));
+      __ Push(scratch);
+    } else {
+      // No push instruction for this operand type. Bump the stack pointer and
+      // assemble the move.
+      int last_frame_slot_id =
+          frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+      int sp_delta = frame_access_state_->sp_delta();
+      int temp_slot = last_frame_slot_id + sp_delta + new_slots;
+      __ Dsubu(sp, sp, Operand(new_slots * kSystemPointerSize));
+      AllocatedOperand temp(LocationOperand::STACK_SLOT, rep, temp_slot);
+      AssembleMove(source, &temp);
+    }
+    frame_access_state()->IncreaseSPDelta(new_slots);
+  }
+}
+
+void CodeGenerator::MoveTempLocationTo(InstructionOperand* dest,
+                                       MachineRepresentation rep) {
+  if (move_cycle_.scratch_reg.has_value()) {
+    // auto& scratch_reg = *move_cycle_.scratch_reg;
+    AllocatedOperand scratch(LocationOperand::REGISTER, rep,
+                             move_cycle_.scratch_reg->code());
+    AssembleMove(&scratch, dest);
+  } else {
+    int new_slots = ElementSizeInPointers(rep);
+    frame_access_state()->IncreaseSPDelta(-new_slots);
+    MipsOperandConverter g(this, nullptr);
+    if (dest->IsRegister()) {
+      __ Pop(g.ToRegister(dest));
+    } else if (dest->IsStackSlot()) {
+      UseScratchRegisterScope temps2(tasm());
+      Register scratch = temps2.Acquire();
+      __ Pop(scratch);
+      __ Sd(scratch, g.ToMemOperand(dest));
+    } else {
+      int last_frame_slot_id =
+          frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+      int sp_delta = frame_access_state_->sp_delta();
+      int temp_slot = last_frame_slot_id + sp_delta + new_slots;
+      AllocatedOperand temp(LocationOperand::STACK_SLOT, rep, temp_slot);
+      AssembleMove(&temp, dest);
+      __ Daddu(sp, sp, Operand(new_slots * kSystemPointerSize));
+    }
+  }
+  // Restore the default state to release the {UseScratchRegisterScope} and to
+  // prepare for the next cycle.
+  move_cycle_ = MoveCycleState();
+}
+
+void CodeGenerator::SetPendingMove(MoveOperands* move) {
+  InstructionOperand* src = &move->source();
+  InstructionOperand* dst = &move->destination();
+  UseScratchRegisterScope temps(tasm());
+  if (src->IsConstant() && dst->IsFPLocationOperand()) {
+    Register temp = temps.Acquire();
+    move_cycle_.scratch_regs.set(temp);
+  } else if (src->IsAnyStackSlot() || dst->IsAnyStackSlot()) {
+    MipsOperandConverter g(this, nullptr);
+    bool src_need_scratch = false;
+    bool dst_need_scratch = false;
+    if (src->IsAnyStackSlot()) {
+      MemOperand src_mem = g.ToMemOperand(src);
+      src_need_scratch =
+          (!is_int16(src_mem.offset())) || (((src_mem.offset() & 0b111) != 0) &&
+                                            !is_int16(src_mem.offset() + 4));
+    }
+    if (dst->IsAnyStackSlot()) {
+      MemOperand dst_mem = g.ToMemOperand(dst);
+      dst_need_scratch =
+          (!is_int16(dst_mem.offset())) || (((dst_mem.offset() & 0b111) != 0) &&
+                                            !is_int16(dst_mem.offset() + 4));
+    }
+    if (src_need_scratch || dst_need_scratch) {
+      Register temp = temps.Acquire();
+      move_cycle_.scratch_regs.set(temp);
+    }
+  }
+}
+
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {
   MipsOperandConverter g(this, nullptr);
@@ -4399,9 +4534,6 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
           break;
         case Constant::kExternalReference:
           __ li(dst, src.ToExternalReference());
-          break;
-        case Constant::kDelayedStringConstant:
-          __ li(dst, src.ToDelayedStringConstant());
           break;
         case Constant::kHeapObject: {
           Handle<HeapObject> src_object = src.ToHeapObject();
@@ -4563,35 +4695,25 @@ void CodeGenerator::AssembleSwap(InstructionOperand* source,
     DCHECK(destination->IsFPStackSlot());
     Register temp_0 = kScratchReg;
     MemOperand src0 = g.ToMemOperand(source);
-    MemOperand src1(src0.rm(), src0.offset() + kIntSize);
+    MemOperand src1(src0.rm(), src0.offset() + kInt64Size);
     MemOperand dst0 = g.ToMemOperand(destination);
-    MemOperand dst1(dst0.rm(), dst0.offset() + kIntSize);
+    MemOperand dst1(dst0.rm(), dst0.offset() + kInt64Size);
     MachineRepresentation rep = LocationOperand::cast(source)->representation();
     if (rep == MachineRepresentation::kSimd128) {
-      MemOperand src2(src0.rm(), src0.offset() + 2 * kIntSize);
-      MemOperand src3(src0.rm(), src0.offset() + 3 * kIntSize);
-      MemOperand dst2(dst0.rm(), dst0.offset() + 2 * kIntSize);
-      MemOperand dst3(dst0.rm(), dst0.offset() + 3 * kIntSize);
       CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
       MSARegister temp_1 = kSimd128ScratchReg;
       __ ld_b(temp_1, dst0);  // Save destination in temp_1.
-      __ Lw(temp_0, src0);    // Then use temp_0 to copy source to destination.
-      __ Sw(temp_0, dst0);
-      __ Lw(temp_0, src1);
-      __ Sw(temp_0, dst1);
-      __ Lw(temp_0, src2);
-      __ Sw(temp_0, dst2);
-      __ Lw(temp_0, src3);
-      __ Sw(temp_0, dst3);
+      __ Ld(temp_0, src0);    // Then use temp_0 to copy source to destination.
+      __ Sd(temp_0, dst0);
+      __ Ld(temp_0, src1);
+      __ Sd(temp_0, dst1);
       __ st_b(temp_1, src0);
     } else {
       FPURegister temp_1 = kScratchDoubleReg;
       __ Ldc1(temp_1, dst0);  // Save destination in temp_1.
-      __ Lw(temp_0, src0);    // Then use temp_0 to copy source to destination.
-      __ Sw(temp_0, dst0);
-      __ Lw(temp_0, src1);
-      __ Sw(temp_0, dst1);
+      __ Ld(temp_0, src0);    // Then use temp_0 to copy source to destination.
       __ Sdc1(temp_1, src0);
+      __ Sd(temp_0, dst0);
     }
   } else {
     // No other combinations are possible.

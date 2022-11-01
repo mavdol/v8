@@ -150,7 +150,7 @@ void CompileJumpTableThunk(Address thunk, Address jump_target) {
   __ lw(scratch, MemOperand(scratch, 0));
   __ Branch(&exit, ne, scratch, Operand(zero_reg));
   __ Jump(jump_target, RelocInfo::NO_INFO);
-#elif V8_TARGET_ARCH_RISCV64
+#elif V8_TARGET_ARCH_RISCV64 || V8_TARGET_ARCH_RISCV32
   __ li(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
   __ Lw(scratch, MemOperand(scratch, 0));
   __ Branch(&exit, ne, scratch, Operand(zero_reg));
@@ -202,6 +202,7 @@ class JumpTablePatcher : public v8::base::Thread {
         jump_table_mutex_(jump_table_mutex) {}
 
   void Run() override {
+    RwxMemoryWriteScope::SetDefaultPermissionsForNewThread();
     TRACE("Patcher %p is starting ...\n", this);
     RwxMemoryWriteScopeForTesting rwx_write_scope;
     Address slot_address =
@@ -247,14 +248,13 @@ TEST(JumpTablePatchingStress) {
   constexpr int kNumberOfRunnerThreads = 5;
   constexpr int kNumberOfPatcherThreads = 3;
 
-  STATIC_ASSERT(kAssemblerBufferSize >= kJumpTableSize);
+  static_assert(kAssemblerBufferSize >= kJumpTableSize);
   auto buffer = AllocateAssemblerBuffer(kAssemblerBufferSize, nullptr,
                                         JitPermission::kMapAsJittable);
   byte* thunk_slot_buffer = buffer->start() + kBufferSlotStartOffset;
 
   std::bitset<kAvailableBufferSlots> used_thunk_slots;
   buffer->MakeWritableAndExecutable();
-  RwxMemoryWriteScopeForTesting rwx_write_scope;
 
   // Iterate through jump-table slots to hammer at different alignments within
   // the jump-table, thereby increasing stress for variable-length ISAs.
@@ -265,6 +265,7 @@ TEST(JumpTablePatchingStress) {
     std::vector<std::unique_ptr<TestingAssemblerBuffer>> thunk_buffers;
     std::vector<Address> patcher_thunks;
     {
+      RwxMemoryWriteScopeForTesting rwx_write_scope;
       // Patch the jump table slot to jump to itself. This will later be patched
       // by the patchers.
       Address slot_addr =

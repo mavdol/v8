@@ -11,7 +11,7 @@ namespace internal {
 // The deopt exit sizes below depend on the following IsolateData layout
 // guarantees:
 #define ASSERT_OFFSET(BuiltinName)                                       \
-  STATIC_ASSERT(IsolateData::builtin_tier0_entry_table_offset() +        \
+  static_assert(IsolateData::builtin_tier0_entry_table_offset() +        \
                     Builtins::ToInt(BuiltinName) * kSystemPointerSize <= \
                 0x1000)
 ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Eager);
@@ -35,7 +35,7 @@ void FrameDescription::SetCallerFp(unsigned offset, intptr_t value) {
 }
 
 void FrameDescription::SetCallerConstantPool(unsigned offset, intptr_t value) {
-  DCHECK(FLAG_enable_embedded_constant_pool);
+  DCHECK(V8_EMBEDDED_CONSTANT_POOL_BOOL);
   SetFrameSlot(offset, value);
 }
 

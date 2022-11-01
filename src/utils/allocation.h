@@ -8,8 +8,7 @@
 #include "include/v8-platform.h"
 #include "src/base/address-region.h"
 #include "src/base/compiler-specific.h"
-#include "src/base/platform/platform.h"
-#include "src/common/globals.h"
+#include "src/base/platform/memory.h"
 #include "src/init/v8.h"
 
 namespace v8 {
@@ -26,11 +25,6 @@ class Isolate;
 // allocation fails, these functions call back into the embedder, then attempt
 // the allocation a second time. The embedder callback must not reenter V8.
 
-// Called when allocation routines fail to allocate, even with a possible retry.
-// This function should not return, but should terminate the current processing.
-[[noreturn]] V8_EXPORT_PRIVATE void FatalProcessOutOfMemory(
-    Isolate* isolate, const char* message);
-
 // Superclass for classes managed with new & delete.
 class V8_EXPORT_PRIVATE Malloced {
  public:
@@ -38,13 +32,17 @@ class V8_EXPORT_PRIVATE Malloced {
   static void operator delete(void* p);
 };
 
+// Function that may release reserved memory regions to allow failed allocations
+// to succeed.
+V8_EXPORT_PRIVATE void OnCriticalMemoryPressure();
+
 template <typename T>
 T* NewArray(size_t size) {
   T* result = new (std::nothrow) T[size];
-  if (result == nullptr) {
-    V8::GetCurrentPlatform()->OnCriticalMemoryPressure();
+  if (V8_UNLIKELY(result == nullptr)) {
+    OnCriticalMemoryPressure();
     result = new (std::nothrow) T[size];
-    if (result == nullptr) FatalProcessOutOfMemory(nullptr, "NewArray");
+    if (result == nullptr) V8::FatalProcessOutOfMemory(nullptr, "NewArray");
   }
   return result;
 }
@@ -96,7 +94,11 @@ using MallocFn = void* (*)(size_t);
 // Call free to release memory allocated with this function.
 void* AllocWithRetry(size_t size, MallocFn = base::Malloc);
 
-V8_EXPORT_PRIVATE void* AlignedAlloc(size_t size, size_t alignment);
+// Performs a malloc, with retry logic on failure. Returns nullptr on failure.
+// Call free to release memory allocated with this function.
+base::AllocationResult<void*> AllocAtLeastWithRetry(size_t size);
+
+V8_EXPORT_PRIVATE void* AlignedAllocWithRetry(size_t size, size_t alignment);
 V8_EXPORT_PRIVATE void AlignedFree(void* ptr);
 
 // Returns platfrom page allocator instance. Guaranteed to be a valid pointer.
@@ -106,7 +108,7 @@ V8_EXPORT_PRIVATE v8::PageAllocator* GetPlatformPageAllocator();
 // pointer.
 V8_EXPORT_PRIVATE v8::VirtualAddressSpace* GetPlatformVirtualAddressSpace();
 
-#ifdef V8_SANDBOX
+#ifdef V8_ENABLE_SANDBOX
 // Returns the page allocator instance for allocating pages inside the sandbox.
 // Guaranteed to be a valid pointer.
 V8_EXPORT_PRIVATE v8::PageAllocator* GetSandboxPageAllocator();
@@ -117,7 +119,7 @@ V8_EXPORT_PRIVATE v8::PageAllocator* GetSandboxPageAllocator();
 // sandbox and so this will be the SandboxPageAllocator. Otherwise it will be
 // the PlatformPageAllocator.
 inline v8::PageAllocator* GetArrayBufferPageAllocator() {
-#ifdef V8_SANDBOX
+#ifdef V8_ENABLE_SANDBOX
   return GetSandboxPageAllocator();
 #else
   return GetPlatformPageAllocator();
@@ -137,10 +139,6 @@ V8_EXPORT_PRIVATE size_t AllocatePageSize();
 
 // Gets the granularity at which the permissions and release calls can be made.
 V8_EXPORT_PRIVATE size_t CommitPageSize();
-
-// Sets the random seed so that GetRandomMmapAddr() will generate repeatable
-// sequences of random mmap addresses.
-V8_EXPORT_PRIVATE void SetRandomMmapSeed(int64_t seed);
 
 // Generate a random address to be used for hinting allocation calls.
 V8_EXPORT_PRIVATE void* GetRandomMmapAddr();
@@ -182,11 +180,6 @@ inline bool SetPermissions(v8::PageAllocator* page_allocator, Address address,
   return SetPermissions(page_allocator, reinterpret_cast<void*>(address), size,
                         access);
 }
-
-// Function that may release reserved memory regions to allow failed allocations
-// to succeed. |length| is the amount of memory needed. Returns |true| if memory
-// could be released, false otherwise.
-V8_EXPORT_PRIVATE bool OnCriticalMemoryPressure(size_t length);
 
 // Defines whether the address space reservation is going to be used for
 // allocating executable pages.

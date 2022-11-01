@@ -7,11 +7,11 @@
 
 #include "src/base/macros.h"
 
-namespace heap {
-namespace base {
+namespace heap::base {
 
 class StackVisitor {
  public:
+  virtual ~StackVisitor() = default;
   virtual void VisitPointer(const void* address) = 0;
 };
 
@@ -46,17 +46,16 @@ class V8_EXPORT_PRIVATE Stack final {
   // Returns the start of the stack.
   const void* stack_start() const { return stack_start_; }
 
-  // Get the current stack pointer for the stack, on which local variables are
-  // stored. In case the safe-stack is enabled (-fsanitize=safe-stack), this
-  // will return the stack pointer for the unsafe-stack. Otherwise, the function
-  // returns the stack pointer for the native stack.
-  static const void* GetCurrentStackPointerForLocalVariables();
+  // Sets, clears and gets the stack marker.
+  void set_marker(const void* stack_marker);
+  void clear_marker();
+  const void* get_marker() const;
 
  private:
   const void* stack_start_;
+  const void* stack_marker_ = nullptr;
 };
 
-}  // namespace base
-}  // namespace heap
+}  // namespace heap::base
 
 #endif  // V8_HEAP_BASE_STACK_H_

@@ -8,6 +8,7 @@
 #include "src/codegen/interface-descriptors.h"
 #include "src/codegen/register-configuration.h"
 #include "src/codegen/reloc-info.h"
+#include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimized-frame-info.h"
 #include "src/deoptimizer/materialized-object-store.h"
 #include "src/execution/frames-inl.h"
@@ -181,9 +182,9 @@ Code Deoptimizer::FindDeoptimizingCode(Address addr) {
     NativeContext native_context = function_.native_context();
     Object element = native_context.DeoptimizedCodeListHead();
     while (!element.IsUndefined(isolate)) {
-      Code code = FromCodeT(CodeT::cast(element));
+      CodeT code = CodeT::cast(element);
       CHECK(CodeKindCanDeoptimize(code.kind()));
-      if (code.contains(isolate, addr)) return code;
+      if (code.contains(isolate, addr)) return FromCodeT(code);
       element = code.next_code_link();
     }
   }
@@ -244,7 +245,8 @@ DeoptimizedFrameInfo* Deoptimizer::DebuggerInspectableFrame(
 namespace {
 class ActivationsFinder : public ThreadVisitor {
  public:
-  explicit ActivationsFinder(std::set<Code>* codes, Code topmost_optimized_code,
+  explicit ActivationsFinder(std::set<CodeT>* codes,
+                             CodeT topmost_optimized_code,
                              bool safe_to_deopt_topmost_optimized_code)
       : codes_(codes) {
 #ifdef DEBUG
@@ -258,17 +260,24 @@ class ActivationsFinder : public ThreadVisitor {
   // it to replace the current pc on the stack.
   void VisitThread(Isolate* isolate, ThreadLocalTop* top) override {
     for (StackFrameIterator it(isolate, top); !it.done(); it.Advance()) {
-      if (it.frame()->type() == StackFrame::OPTIMIZED) {
-        Code code = it.frame()->LookupCode();
+      if (it.frame()->is_optimized()) {
+        CodeT code = it.frame()->LookupCodeT().ToCodeT();
         if (CodeKindCanDeoptimize(code.kind()) &&
             code.marked_for_deoptimization()) {
           codes_->erase(code);
           // Obtain the trampoline to the deoptimizer call.
-          SafepointEntry safepoint =
-              code.GetSafepointEntry(isolate, it.frame()->pc());
-          int trampoline_pc = safepoint.trampoline_pc();
+          int trampoline_pc;
+          if (code.is_maglevved()) {
+            MaglevSafepointEntry safepoint =
+                code.GetMaglevSafepointEntry(isolate, it.frame()->pc());
+            trampoline_pc = safepoint.trampoline_pc();
+          } else {
+            SafepointEntry safepoint =
+                code.GetSafepointEntry(isolate, it.frame()->pc());
+            trampoline_pc = safepoint.trampoline_pc();
+          }
           DCHECK_IMPLIES(code == topmost_, safe_to_deopt_);
-          STATIC_ASSERT(SafepointEntry::kNoTrampolinePC == -1);
+          static_assert(SafepointEntry::kNoTrampolinePC == -1);
           CHECK_GE(trampoline_pc, 0);
           // Replace the current pc on the stack with the trampoline.
           // TODO(v8:10026): avoid replacing a signed pointer.
@@ -281,10 +290,10 @@ class ActivationsFinder : public ThreadVisitor {
   }
 
  private:
-  std::set<Code>* codes_;
+  std::set<CodeT>* codes_;
 
 #ifdef DEBUG
-  Code topmost_;
+  CodeT topmost_;
   bool safe_to_deopt_;
 #endif
 };
@@ -297,7 +306,7 @@ void Deoptimizer::DeoptimizeMarkedCodeForContext(NativeContext native_context) {
   DisallowGarbageCollection no_gc;
 
   Isolate* isolate = native_context.GetIsolate();
-  Code topmost_optimized_code;
+  CodeT topmost_optimized_code;
   bool safe_to_deopt_topmost_optimized_code = false;
 #ifdef DEBUG
   // Make sure all activations of optimized code can deopt at their current PC.
@@ -305,17 +314,23 @@ void Deoptimizer::DeoptimizeMarkedCodeForContext(NativeContext native_context) {
   // deoptimized due to weak object dependency.
   for (StackFrameIterator it(isolate, isolate->thread_local_top()); !it.done();
        it.Advance()) {
-    StackFrame::Type type = it.frame()->type();
-    if (type == StackFrame::OPTIMIZED) {
-      Code code = it.frame()->LookupCode();
+    if (it.frame()->is_optimized()) {
+      CodeT code = it.frame()->LookupCodeT().ToCodeT();
       JSFunction function =
           static_cast<OptimizedFrame*>(it.frame())->function();
       TraceFoundActivation(isolate, function);
-      SafepointEntry safepoint =
-          code.GetSafepointEntry(isolate, it.frame()->pc());
+      bool safe_if_deopt_triggered;
+      if (code.is_maglevved()) {
+        MaglevSafepointEntry safepoint =
+            code.GetMaglevSafepointEntry(isolate, it.frame()->pc());
+        safe_if_deopt_triggered = safepoint.has_deoptimization_index();
+      } else {
+        SafepointEntry safepoint =
+            code.GetSafepointEntry(isolate, it.frame()->pc());
+        safe_if_deopt_triggered = safepoint.has_deoptimization_index();
+      }
 
-      // Turbofan deopt is checked when we are patching addresses on stack.
-      bool safe_if_deopt_triggered = safepoint.has_deoptimization_index();
+      // Deopt is checked when we are patching addresses on stack.
       bool is_builtin_code = code.kind() == CodeKind::BUILTIN;
       DCHECK(topmost_optimized_code.is_null() || safe_if_deopt_triggered ||
              is_builtin_code);
@@ -329,14 +344,14 @@ void Deoptimizer::DeoptimizeMarkedCodeForContext(NativeContext native_context) {
 
   // We will use this set to mark those Code objects that are marked for
   // deoptimization and have not been found in stack frames.
-  std::set<Code> codes;
+  std::set<CodeT> codes;
 
   // Move marked code from the optimized code list to the deoptimized code list.
   // Walk over all optimized code objects in this native context.
-  Code prev;
+  CodeT prev;
   Object element = native_context.OptimizedCodeListHead();
   while (!element.IsUndefined(isolate)) {
-    Code code = FromCodeT(CodeT::cast(element));
+    CodeT code = CodeT::cast(element);
     CHECK(CodeKindCanDeoptimize(code.kind()));
     Object next = code.next_code_link();
 
@@ -356,7 +371,7 @@ void Deoptimizer::DeoptimizeMarkedCodeForContext(NativeContext native_context) {
 
       // Move the code to the _deoptimized_ code list.
       code.set_next_code_link(native_context.DeoptimizedCodeListHead());
-      native_context.SetDeoptimizedCodeListHead(ToCodeT(code));
+      native_context.SetDeoptimizedCodeListHead(code);
     } else {
       // Not marked; preserve this element.
       prev = code;
@@ -376,8 +391,8 @@ void Deoptimizer::DeoptimizeMarkedCodeForContext(NativeContext native_context) {
   // If there's no activation of a code in any stack then we can remove its
   // deoptimization data. We do this to ensure that code objects that are
   // unlinked don't transitively keep objects alive unnecessarily.
-  for (Code code : codes) {
-    isolate->heap()->InvalidateCodeDeoptimizationData(code);
+  for (CodeT code : codes) {
+    isolate->heap()->InvalidateCodeDeoptimizationData(FromCodeT(code));
   }
 }
 
@@ -424,13 +439,13 @@ void Deoptimizer::MarkAllCodeForContext(NativeContext native_context) {
   }
 }
 
-void Deoptimizer::DeoptimizeFunction(JSFunction function, Code code) {
+void Deoptimizer::DeoptimizeFunction(JSFunction function, CodeT code) {
   Isolate* isolate = function.GetIsolate();
   RCS_SCOPE(isolate, RuntimeCallCounterId::kDeoptimizeCode);
   TimerEventScope<TimerEventDeoptimizeCode> timer(isolate);
   TRACE_EVENT0("v8", "V8.DeoptimizeCode");
   function.ResetIfCodeFlushed();
-  if (code.is_null()) code = FromCodeT(function.code());
+  if (code.is_null()) code = function.code();
 
   if (CodeKindCanDeoptimize(code.kind())) {
     // Mark the code for deoptimization and unlink any functions that also
@@ -469,6 +484,7 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
       deoptimizing_throw_(false),
       catch_handler_data_(-1),
       catch_handler_pc_offset_(-1),
+      restart_frame_index_(-1),
       input_(nullptr),
       output_count_(0),
       output_(nullptr),
@@ -478,12 +494,20 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
       caller_constant_pool_(0),
       actual_argument_count_(0),
       stack_fp_(0),
-      trace_scope_(FLAG_trace_deopt || FLAG_log_deopt
+      trace_scope_(v8_flags.trace_deopt || v8_flags.log_deopt
                        ? new CodeTracer::Scope(isolate->GetCodeTracer())
                        : nullptr) {
   if (isolate->deoptimizer_lazy_throw()) {
+    CHECK_EQ(kind, DeoptimizeKind::kLazy);
     isolate->set_deoptimizer_lazy_throw(false);
     deoptimizing_throw_ = true;
+  }
+
+  if (isolate->debug()->IsRestartFrameScheduled()) {
+    CHECK(deoptimizing_throw_);
+    restart_frame_index_ = isolate->debug()->restart_inline_frame_index();
+    CHECK_GE(restart_frame_index_, 0);
+    isolate->debug()->clear_restart_frame();
   }
 
   DCHECK_NE(from, kNullAddress);
@@ -504,7 +528,7 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
   unsigned size = ComputeInputFrameSize();
   const int parameter_count =
       function.shared().internal_formal_parameter_count_with_receiver();
-  input_ = new (size) FrameDescription(size, parameter_count);
+  input_ = new (size) FrameDescription(size, parameter_count, isolate_);
 
   DCHECK_EQ(deopt_exit_index_, kFixedExitSizeMarker);
   // Calculate the deopt exit index from return address.
@@ -540,8 +564,9 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
 
 Code Deoptimizer::FindOptimizedCode() {
   Code compiled_code = FindDeoptimizingCode(from_);
-  return !compiled_code.is_null() ? compiled_code
-                                  : isolate_->FindCodeObject(from_);
+  if (!compiled_code.is_null()) return compiled_code;
+  CodeLookupResult lookup_result = isolate_->FindCodeObject(from_);
+  return lookup_result.code();
 }
 
 Handle<JSFunction> Deoptimizer::function() const {
@@ -648,15 +673,14 @@ void Deoptimizer::TraceDeoptBegin(int optimization_id,
                                   BytecodeOffset bytecode_offset) {
   DCHECK(tracing_enabled());
   FILE* file = trace_scope()->file();
-  Deoptimizer::DeoptInfo info =
-      Deoptimizer::GetDeoptInfo(compiled_code_, from_);
+  Deoptimizer::DeoptInfo info = Deoptimizer::GetDeoptInfo();
   PrintF(file, "[bailout (kind: %s, reason: %s): begin. deoptimizing ",
          MessageFor(deopt_kind_), DeoptimizeReasonToString(info.deopt_reason));
   if (function_.IsJSFunction()) {
     function_.ShortPrint(file);
-  } else {
-    PrintF(file, "%s", CodeKindToString(compiled_code_.kind()));
+    PrintF(file, ", ");
   }
+  compiled_code_.ShortPrint(file);
   PrintF(file,
          ", opt id %d, "
 #ifdef DEBUG
@@ -687,7 +711,7 @@ void Deoptimizer::TraceDeoptEnd(double deopt_duration) {
 
 // static
 void Deoptimizer::TraceMarkForDeoptimization(Code code, const char* reason) {
-  if (!FLAG_trace_deopt && !FLAG_log_deopt) return;
+  if (!v8_flags.trace_deopt && !v8_flags.log_deopt) return;
 
   DisallowGarbageCollection no_gc;
   Isolate* isolate = code.GetIsolate();
@@ -696,14 +720,15 @@ void Deoptimizer::TraceMarkForDeoptimization(Code code, const char* reason) {
 
   DeoptimizationData deopt_data = DeoptimizationData::cast(maybe_data);
   CodeTracer::Scope scope(isolate->GetCodeTracer());
-  if (FLAG_trace_deopt) {
-    PrintF(scope.file(), "[marking dependent code " V8PRIxPTR_FMT " (",
-           code.ptr());
+  if (v8_flags.trace_deopt) {
+    PrintF(scope.file(), "[marking dependent code ");
+    code.ShortPrint(scope.file());
+    PrintF(scope.file(), " (");
     deopt_data.SharedFunctionInfo().ShortPrint(scope.file());
     PrintF(") (opt id %d) for deoptimization, reason: %s]\n",
            deopt_data.OptimizationId().value(), reason);
   }
-  if (!FLAG_log_deopt) return;
+  if (!v8_flags.log_deopt) return;
   no_gc.Release();
   {
     HandleScope handle_scope(isolate);
@@ -720,7 +745,7 @@ void Deoptimizer::TraceMarkForDeoptimization(Code code, const char* reason) {
 // static
 void Deoptimizer::TraceEvictFromOptimizedCodeCache(SharedFunctionInfo sfi,
                                                    const char* reason) {
-  if (!FLAG_trace_deopt_verbose) return;
+  if (!v8_flags.trace_deopt_verbose) return;
 
   DisallowGarbageCollection no_gc;
   CodeTracer::Scope scope(sfi.GetIsolate()->GetCodeTracer());
@@ -734,7 +759,7 @@ void Deoptimizer::TraceEvictFromOptimizedCodeCache(SharedFunctionInfo sfi,
 #ifdef DEBUG
 // static
 void Deoptimizer::TraceFoundActivation(Isolate* isolate, JSFunction function) {
-  if (!FLAG_trace_deopt_verbose) return;
+  if (!v8_flags.trace_deopt_verbose) return;
   CodeTracer::Scope scope(isolate->GetCodeTracer());
   PrintF(scope.file(), "[deoptimizer found activation of function: ");
   function.PrintName(scope.file());
@@ -744,14 +769,14 @@ void Deoptimizer::TraceFoundActivation(Isolate* isolate, JSFunction function) {
 
 // static
 void Deoptimizer::TraceDeoptAll(Isolate* isolate) {
-  if (!FLAG_trace_deopt_verbose) return;
+  if (!v8_flags.trace_deopt_verbose) return;
   CodeTracer::Scope scope(isolate->GetCodeTracer());
   PrintF(scope.file(), "[deoptimize all code in all contexts]\n");
 }
 
 // static
 void Deoptimizer::TraceDeoptMarked(Isolate* isolate) {
-  if (!FLAG_trace_deopt_verbose) return;
+  if (!v8_flags.trace_deopt_verbose) return;
   CodeTracer::Scope scope(isolate->GetCodeTracer());
   PrintF(scope.file(), "[deoptimize marked code in all contexts]\n");
 }
@@ -788,7 +813,7 @@ void Deoptimizer::DoComputeOutputFrames() {
     actual_argument_count_ = static_cast<int>(
         Memory<intptr_t>(fp_address + StandardFrameConstants::kArgCOffset));
 
-    if (FLAG_enable_embedded_constant_pool) {
+    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
       caller_constant_pool_ = Memory<intptr_t>(
           fp_address + CommonFrameConstants::kConstantPoolOffset);
     }
@@ -826,9 +851,13 @@ void Deoptimizer::DoComputeOutputFrames() {
 
   // Do the input frame to output frame(s) translation.
   size_t count = translated_state_.frames().size();
-  // If we are supposed to go to the catch handler, find the catching frame
-  // for the catch and make sure we only deoptimize up to that frame.
-  if (deoptimizing_throw_) {
+  if (is_restart_frame()) {
+    // If the debugger requested to restart a particular frame, only materialize
+    // up to that frame.
+    count = restart_frame_index_ + 1;
+  } else if (deoptimizing_throw_) {
+    // If we are supposed to go to the catch handler, find the catching frame
+    // for the catch and make sure we only deoptimize up to that frame.
     size_t catch_handler_frame_index = count;
     for (size_t i = count; i-- > 0;) {
       catch_handler_pc_offset_ = LookupCatchHandler(
@@ -919,8 +948,11 @@ void Deoptimizer::DoComputeOutputFrames() {
 namespace {
 
 // Get the dispatch builtin for unoptimized frames.
-Builtin DispatchBuiltinFor(bool is_baseline, bool advance_bc) {
-  if (is_baseline) {
+Builtin DispatchBuiltinFor(bool deopt_to_baseline, bool advance_bc,
+                           bool is_restart_frame) {
+  if (is_restart_frame) return Builtin::kRestartFrameTrampoline;
+
+  if (deopt_to_baseline) {
     return advance_bc ? Builtin::kBaselineOrInterpreterEnterAtNextBytecode
                       : Builtin::kBaselineOrInterpreterEnterAtBytecode;
   } else {
@@ -967,7 +999,7 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
 
   // Allocate and store the output frame description.
   FrameDescription* output_frame = new (output_frame_size)
-      FrameDescription(output_frame_size, parameters_count);
+      FrameDescription(output_frame_size, parameters_count, isolate());
   FrameWriter frame_writer(this, output_frame, verbose_trace_scope());
 
   CHECK(frame_index >= 0 && frame_index < output_count_);
@@ -986,13 +1018,15 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
   const bool advance_bc =
       (!is_topmost || (deopt_kind_ == DeoptimizeKind::kLazy)) &&
       !goto_catch_handler;
-  const bool is_baseline = shared.HasBaselineCode();
-  Code dispatch_builtin =
-      FromCodeT(builtins->code(DispatchBuiltinFor(is_baseline, advance_bc)));
+  const bool deopt_to_baseline =
+      shared.HasBaselineCode() && v8_flags.deopt_to_baseline;
+  const bool restart_frame = goto_catch_handler && is_restart_frame();
+  CodeT dispatch_builtin = builtins->code(
+      DispatchBuiltinFor(deopt_to_baseline, advance_bc, restart_frame));
 
   if (verbose_tracing_enabled()) {
     PrintF(trace_scope()->file(), "  translating %s frame ",
-           is_baseline ? "baseline" : "interpreted");
+           deopt_to_baseline ? "baseline" : "interpreted");
     std::unique_ptr<char[]> name = shared.DebugNameCStr();
     PrintF(trace_scope()->file(), "%s", name.get());
     PrintF(trace_scope()->file(), " => bytecode_offset=%d, ",
@@ -1061,7 +1095,7 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
     output_frame->SetRegister(fp_reg.code(), fp_value);
   }
 
-  if (FLAG_enable_embedded_constant_pool) {
+  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
     // For the bottommost output frame the constant pool pointer can be gotten
     // from the input frame. For subsequent output frames, it can be read from
     // the previous frame.
@@ -1202,14 +1236,14 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
     // Only the pc of the topmost frame needs to be signed since it is
     // authenticated at the end of the DeoptimizationEntry builtin.
     const intptr_t top_most_pc = PointerAuthentication::SignAndCheckPC(
-        pc, frame_writer.frame()->GetTop());
+        isolate(), pc, frame_writer.frame()->GetTop());
     output_frame->SetPc(top_most_pc);
   } else {
     output_frame->SetPc(pc);
   }
 
   // Update constant pool.
-  if (FLAG_enable_embedded_constant_pool) {
+  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
     intptr_t constant_pool_value =
         static_cast<intptr_t>(dispatch_builtin.constant_pool());
     output_frame->SetConstantPool(constant_pool_value);
@@ -1267,7 +1301,8 @@ void Deoptimizer::DoComputeInlinedExtraArguments(
 
   // Allocate and store the output frame description.
   FrameDescription* output_frame = new (output_frame_size) FrameDescription(
-      output_frame_size, JSParameterCount(argument_count_without_receiver));
+      output_frame_size, JSParameterCount(argument_count_without_receiver),
+      isolate());
   // The top address of the frame is computed from the previous frame's top and
   // this frame's size.
   const intptr_t top_address =
@@ -1307,8 +1342,7 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
   CHECK(!is_topmost || deopt_kind_ == DeoptimizeKind::kLazy);
 
   Builtins* builtins = isolate_->builtins();
-  Code construct_stub =
-      FromCodeT(builtins->code(Builtin::kJSConstructStubGeneric));
+  CodeT construct_stub = builtins->code(Builtin::kJSConstructStubGeneric);
   BytecodeOffset bytecode_offset = translated_frame->bytecode_offset();
 
   const int parameters_count = translated_frame->height();
@@ -1329,7 +1363,7 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
 
   // Allocate and store the output frame description.
   FrameDescription* output_frame = new (output_frame_size)
-      FrameDescription(output_frame_size, parameters_count);
+      FrameDescription(output_frame_size, parameters_count, isolate());
   FrameWriter frame_writer(this, output_frame, verbose_trace_scope());
 
   // Construct stub can not be topmost.
@@ -1374,7 +1408,7 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
     output_frame->SetRegister(fp_reg.code(), fp_value);
   }
 
-  if (FLAG_enable_embedded_constant_pool) {
+  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
     // Read the caller's constant pool from the previous frame.
     const intptr_t caller_cp = output_[frame_index - 1]->GetConstantPool();
     frame_writer.PushCallerConstantPool(caller_cp);
@@ -1433,13 +1467,13 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
     // Only the pc of the topmost frame needs to be signed since it is
     // authenticated at the end of the DeoptimizationEntry builtin.
     output_frame->SetPc(PointerAuthentication::SignAndCheckPC(
-        pc_value, frame_writer.frame()->GetTop()));
+        isolate(), pc_value, frame_writer.frame()->GetTop()));
   } else {
     output_frame->SetPc(pc_value);
   }
 
   // Update constant pool.
-  if (FLAG_enable_embedded_constant_pool) {
+  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
     intptr_t constant_pool_value =
         static_cast<intptr_t>(construct_stub.constant_pool());
     output_frame->SetConstantPool(constant_pool_value);
@@ -1677,8 +1711,8 @@ void Deoptimizer::DoComputeBuiltinContinuation(
            frame_info.stack_parameter_count(), output_frame_size);
   }
 
-  FrameDescription* output_frame = new (output_frame_size)
-      FrameDescription(output_frame_size, frame_info.stack_parameter_count());
+  FrameDescription* output_frame = new (output_frame_size) FrameDescription(
+      output_frame_size, frame_info.stack_parameter_count(), isolate());
   output_[frame_index] = output_frame;
   FrameWriter frame_writer(this, output_frame, verbose_trace_scope());
 
@@ -1788,7 +1822,7 @@ void Deoptimizer::DoComputeBuiltinContinuation(
 
   DCHECK_EQ(output_frame_size_above_fp, frame_writer.top_offset());
 
-  if (FLAG_enable_embedded_constant_pool) {
+  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
     // Read the caller's constant pool from the previous frame.
     const intptr_t caller_cp =
         is_bottommost ? caller_constant_pool_
@@ -1894,6 +1928,7 @@ void Deoptimizer::DoComputeBuiltinContinuation(
     // Only the pc of the topmost frame needs to be signed since it is
     // authenticated at the end of the DeoptimizationEntry builtin.
     const intptr_t top_most_pc = PointerAuthentication::SignAndCheckPC(
+        isolate(),
         static_cast<intptr_t>(continue_to_builtin.InstructionStart()),
         frame_writer.frame()->GetTop());
     output_frame->SetPc(top_most_pc);
@@ -1909,7 +1944,7 @@ void Deoptimizer::DoComputeBuiltinContinuation(
 
 void Deoptimizer::MaterializeHeapObjects() {
   translated_state_.Prepare(static_cast<Address>(stack_fp_));
-  if (FLAG_deopt_every_n_times > 0) {
+  if (v8_flags.deopt_every_n_times > 0) {
     // Doing a GC here will find problems with the deoptimized frames.
     isolate_->heap()->CollectAllGarbage(Heap::kNoGCFlags,
                                         GarbageCollectionReason::kTesting);
@@ -1936,8 +1971,7 @@ void Deoptimizer::MaterializeHeapObjects() {
   bool feedback_updated = translated_state_.DoUpdateFeedback();
   if (verbose_tracing_enabled() && feedback_updated) {
     FILE* file = trace_scope()->file();
-    Deoptimizer::DeoptInfo info =
-        Deoptimizer::GetDeoptInfo(compiled_code_, from_);
+    Deoptimizer::DeoptInfo info = Deoptimizer::GetDeoptInfo();
     PrintF(file, "Feedback updated from deoptimization at ");
     OFStream outstr(file);
     info.position.Print(outstr, compiled_code_);
@@ -2023,7 +2057,7 @@ int Deoptimizer::ComputeSourcePositionFromBytecodeArray(
     BytecodeOffset bytecode_offset) {
   DCHECK(shared.HasBytecodeArray());
   return AbstractCode::cast(shared.GetBytecodeArray(isolate))
-      .SourcePosition(bytecode_offset.ToInt());
+      .SourcePosition(isolate, bytecode_offset.ToInt());
 }
 
 }  // namespace internal

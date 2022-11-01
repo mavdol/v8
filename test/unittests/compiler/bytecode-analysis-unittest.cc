@@ -5,10 +5,8 @@
 #include "src/compiler/bytecode-analysis.h"
 
 #include "src/compiler/bytecode-liveness-map.h"
-#include "src/init/v8.h"
 #include "src/interpreter/bytecode-array-builder.h"
 #include "src/interpreter/bytecode-array-iterator.h"
-#include "src/interpreter/bytecode-decoder.h"
 #include "src/interpreter/bytecode-label.h"
 #include "src/interpreter/control-flow-builders.h"
 #include "src/objects/objects-inl.h"
@@ -31,8 +29,8 @@ class BytecodeAnalysisTest : public TestWithIsolateAndZone {
   static void SetUpTestSuite() {
     CHECK_NULL(save_flags_);
     save_flags_ = new SaveFlags();
-    i::FLAG_ignition_elide_noneffectful_bytecodes = false;
-    i::FLAG_ignition_reo = false;
+    i::v8_flags.ignition_elide_noneffectful_bytecodes = false;
+    i::v8_flags.ignition_reo = false;
 
     TestWithIsolateAndZone::SetUpTestSuite();
   }

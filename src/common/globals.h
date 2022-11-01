@@ -46,9 +46,6 @@ namespace internal {
 #if (V8_TARGET_ARCH_PPC64 && !V8_HOST_ARCH_PPC64)
 #define USE_SIMULATOR 1
 #endif
-#if (V8_TARGET_ARCH_MIPS && !V8_HOST_ARCH_MIPS)
-#define USE_SIMULATOR 1
-#endif
 #if (V8_TARGET_ARCH_MIPS64 && !V8_HOST_ARCH_MIPS64)
 #define USE_SIMULATOR 1
 #endif
@@ -58,18 +55,94 @@ namespace internal {
 #if (V8_TARGET_ARCH_RISCV64 && !V8_HOST_ARCH_RISCV64)
 #define USE_SIMULATOR 1
 #endif
+#if (V8_TARGET_ARCH_RISCV32 && !V8_HOST_ARCH_RISCV32)
+#define USE_SIMULATOR 1
+#endif
 #if (V8_TARGET_ARCH_LOONG64 && !V8_HOST_ARCH_LOONG64)
 #define USE_SIMULATOR 1
 #endif
 #endif
 
+#if USE_SIMULATOR
+#define USE_SIMULATOR_BOOL true
+#else
+#define USE_SIMULATOR_BOOL false
+#endif
+
 // Determine whether the architecture uses an embedded constant pool
 // (contiguous constant pool embedded in code object).
 #if V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
-#define V8_EMBEDDED_CONSTANT_POOL true
+#define V8_EMBEDDED_CONSTANT_POOL_BOOL true
 #else
-#define V8_EMBEDDED_CONSTANT_POOL false
+#define V8_EMBEDDED_CONSTANT_POOL_BOOL false
 #endif
+
+#ifdef DEBUG
+#define DEBUG_BOOL true
+#else
+#define DEBUG_BOOL false
+#endif
+
+#ifdef V8_MAP_PACKING
+#define V8_MAP_PACKING_BOOL true
+#else
+#define V8_MAP_PACKING_BOOL false
+#endif
+
+#ifdef V8_COMPRESS_POINTERS
+#define COMPRESS_POINTERS_BOOL true
+#else
+#define COMPRESS_POINTERS_BOOL false
+#endif
+
+#if COMPRESS_POINTERS_BOOL && V8_TARGET_ARCH_X64
+#define DECOMPRESS_POINTER_BY_ADDRESSING_MODE true
+#else
+#define DECOMPRESS_POINTER_BY_ADDRESSING_MODE false
+#endif
+
+#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+#define COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL true
+#else
+#define COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL false
+#endif
+
+#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+#define COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL true
+#else
+#define COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL false
+#endif
+
+#if defined(V8_SHARED_RO_HEAP) &&                     \
+    (!defined(V8_COMPRESS_POINTERS) ||                \
+     defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)) && \
+    !defined(V8_DISABLE_WRITE_BARRIERS)
+#define V8_CAN_CREATE_SHARED_HEAP_BOOL true
+#else
+#define V8_CAN_CREATE_SHARED_HEAP_BOOL false
+#endif
+
+#ifdef V8_ENABLE_SANDBOX
+#define V8_ENABLE_SANDBOX_BOOL true
+#else
+#define V8_ENABLE_SANDBOX_BOOL false
+#endif
+
+// D8's MultiMappedAllocator is only available on Linux, and only if the sandbox
+// is not enabled.
+#if V8_OS_LINUX && !V8_ENABLE_SANDBOX_BOOL
+#define MULTI_MAPPED_ALLOCATOR_AVAILABLE true
+#else
+#define MULTI_MAPPED_ALLOCATOR_AVAILABLE false
+#endif
+
+#ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
+#define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL true
+#else
+#define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
+#endif
+
+#define ENABLE_SPARKPLUG true
 
 #if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
 // Set stack limit lower for ARM and ARM64 than for other architectures because:
@@ -79,9 +152,16 @@ namespace internal {
 //    initializing V8 we already have a large stack and so have to set the
 //    limit lower. See issue crbug.com/v8/10575
 #define V8_DEFAULT_STACK_SIZE_KB 864
+#elif V8_TARGET_ARCH_IA32
+// In mid-2022, we're observing an increase in stack overflow crashes on
+// 32-bit Windows; the suspicion is that some third-party software suddenly
+// started to consume a lot more stack memory (before V8 is even initialized).
+// So we speculatively lower the ia32 limit to the ARM limit for the time
+// being. See crbug.com/1346791.
+#define V8_DEFAULT_STACK_SIZE_KB 864
 #else
 // Slightly less than 1MB, since Windows' default stack size for
-// the main execution thread is 1MB for both 32 and 64-bit.
+// the main execution thread is 1MB.
 #define V8_DEFAULT_STACK_SIZE_KB 984
 #endif
 
@@ -107,7 +187,7 @@ constexpr int kStackSpaceRequiredForCompilation = 40;
 constexpr int kStackLimitSlackForDeoptimizationInBytes = 256;
 
 // Sanity-check, assuming that we aim for a real OS stack size of at least 1MB.
-STATIC_ASSERT(V8_DEFAULT_STACK_SIZE_KB* KB +
+static_assert(V8_DEFAULT_STACK_SIZE_KB * KB +
                   kStackLimitSlackForDeoptimizationInBytes <=
               MB);
 
@@ -145,6 +225,8 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
 
 #ifdef V8_EXTERNAL_CODE_SPACE
 #define V8_EXTERNAL_CODE_SPACE_BOOL true
+// This flag enables the mode when V8 does not create trampoline Code objects
+// for builtins. It should be enough to have only CodeDataContainer objects.
 class CodeDataContainer;
 using CodeT = CodeDataContainer;
 #else
@@ -188,10 +270,17 @@ using CodeT = Code;
 //
 #if V8_HAS_PTHREAD_JIT_WRITE_PROTECT && \
     !(defined(V8_COMPRESS_POINTERS) && !defined(V8_EXTERNAL_CODE_SPACE))
-// TODO(v8:12797): enable fast W^X permissions switching on Apple Silicon.
-#define V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT false
+#define V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT true
 #else
 #define V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT false
+#endif
+
+// TODO(v8:13023): enable PKU support when we have a test coverage
+#if V8_HAS_PKU_JIT_WRITE_PROTECT && \
+    !(defined(V8_COMPRESS_POINTERS) && !defined(V8_EXTERNAL_CODE_SPACE))
+#define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT false
+#else
+#define V8_HEAP_USE_PKU_JIT_WRITE_PROTECT false
 #endif
 
 // Determine whether tagged pointers are 8 bytes (used in Torque layouts for
@@ -305,7 +394,14 @@ constexpr bool kPlatformRequiresCodeRange = true;
 constexpr size_t kMaximalCodeRangeSize = 512 * MB;
 constexpr size_t kMinExpectedOSPageSize = 64 * KB;  // OS page on PPC Linux
 #elif V8_TARGET_ARCH_ARM64
-constexpr size_t kMaximalCodeRangeSize = 128 * MB;
+constexpr size_t kMaximalCodeRangeSize =
+    (COMPRESS_POINTERS_BOOL && !V8_EXTERNAL_CODE_SPACE_BOOL) ? 128 * MB
+                                                             : 256 * MB;
+constexpr size_t kMinExpectedOSPageSize = 4 * KB;  // OS page.
+#elif V8_TARGET_ARCH_X64
+constexpr size_t kMaximalCodeRangeSize =
+    (COMPRESS_POINTERS_BOOL && !V8_EXTERNAL_CODE_SPACE_BOOL) ? 128 * MB
+                                                             : 512 * MB;
 constexpr size_t kMinExpectedOSPageSize = 4 * KB;  // OS page.
 #else
 constexpr size_t kMaximalCodeRangeSize = 128 * MB;
@@ -318,7 +414,9 @@ constexpr size_t kReservedCodeRangePages = 1;
 constexpr size_t kMinimumCodeRangeSize = 3 * MB;
 constexpr size_t kReservedCodeRangePages = 0;
 #endif
-#else
+
+#else  // V8_HOST_ARCH_64_BIT
+
 constexpr int kSystemPointerSizeLog2 = 2;
 constexpr intptr_t kIntptrSignBit = 0x80000000;
 #if (V8_HOST_ARCH_PPC || V8_HOST_ARCH_PPC64) && \
@@ -327,7 +425,7 @@ constexpr bool kPlatformRequiresCodeRange = false;
 constexpr size_t kMaximalCodeRangeSize = 0 * MB;
 constexpr size_t kMinimumCodeRangeSize = 0 * MB;
 constexpr size_t kMinExpectedOSPageSize = 64 * KB;  // OS page on PPC Linux
-#elif V8_TARGET_ARCH_MIPS
+#elif V8_TARGET_ARCH_RISCV32
 constexpr bool kPlatformRequiresCodeRange = false;
 constexpr size_t kMaximalCodeRangeSize = 2048LL * MB;
 constexpr size_t kMinimumCodeRangeSize = 0 * MB;
@@ -339,9 +437,9 @@ constexpr size_t kMinimumCodeRangeSize = 0 * MB;
 constexpr size_t kMinExpectedOSPageSize = 4 * KB;  // OS page.
 #endif
 constexpr size_t kReservedCodeRangePages = 0;
-#endif
+#endif  // V8_HOST_ARCH_64_BIT
 
-STATIC_ASSERT(kSystemPointerSize == (1 << kSystemPointerSizeLog2));
+static_assert(kSystemPointerSize == (1 << kSystemPointerSizeLog2));
 
 #ifdef V8_COMPRESS_ZONES
 #define COMPRESS_ZONES_BOOL true
@@ -378,36 +476,43 @@ using AtomicTagged_t = base::AtomicWord;
 
 #endif  // V8_COMPRESS_POINTERS
 
-STATIC_ASSERT(kTaggedSize == (1 << kTaggedSizeLog2));
-STATIC_ASSERT((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);
+static_assert(kTaggedSize == (1 << kTaggedSizeLog2));
+static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);
 
 using AsAtomicTagged = base::AsAtomicPointerImpl<AtomicTagged_t>;
-STATIC_ASSERT(sizeof(Tagged_t) == kTaggedSize);
-STATIC_ASSERT(sizeof(AtomicTagged_t) == kTaggedSize);
+static_assert(sizeof(Tagged_t) == kTaggedSize);
+static_assert(sizeof(AtomicTagged_t) == kTaggedSize);
 
-STATIC_ASSERT(kTaggedSize == kApiTaggedSize);
+static_assert(kTaggedSize == kApiTaggedSize);
 
 // TODO(ishell): use kTaggedSize or kSystemPointerSize instead.
 #ifndef V8_COMPRESS_POINTERS
 constexpr int kPointerSize = kSystemPointerSize;
 constexpr int kPointerSizeLog2 = kSystemPointerSizeLog2;
-STATIC_ASSERT(kPointerSize == (1 << kPointerSizeLog2));
+static_assert(kPointerSize == (1 << kPointerSizeLog2));
+#endif
+
+#ifdef V8_COMPRESS_POINTERS_8GB
+// To support 8GB heaps, all alocations are aligned to at least 8 bytes.
+#define V8_COMPRESS_POINTERS_8GB_BOOL true
+#else
+#define V8_COMPRESS_POINTERS_8GB_BOOL false
 #endif
 
 // This type defines raw storage type for external (or off-V8 heap) pointers
 // stored on V8 heap.
-constexpr int kExternalPointerSize = sizeof(ExternalPointer_t);
-#ifdef V8_SANDBOXED_EXTERNAL_POINTERS
-STATIC_ASSERT(kExternalPointerSize == kTaggedSize);
+constexpr int kExternalPointerSlotSize = sizeof(ExternalPointer_t);
+#ifdef V8_ENABLE_SANDBOX
+static_assert(kExternalPointerSlotSize == kTaggedSize);
 #else
-STATIC_ASSERT(kExternalPointerSize == kSystemPointerSize);
+static_assert(kExternalPointerSlotSize == kSystemPointerSize);
 #endif
 
 constexpr int kEmbedderDataSlotSize = kSystemPointerSize;
 
 constexpr int kEmbedderDataSlotSizeInTaggedSlots =
     kEmbedderDataSlotSize / kTaggedSize;
-STATIC_ASSERT(kEmbedderDataSlotSize >= kSystemPointerSize);
+static_assert(kEmbedderDataSlotSize >= kSystemPointerSize);
 
 constexpr int kExternalAllocationSoftLimit =
     internal::Internals::kExternalAllocationSoftLimit;
@@ -536,7 +641,7 @@ inline LanguageMode construct_language_mode(bool strict_bit) {
 // otherwise.
 inline LanguageMode stricter_language_mode(LanguageMode mode1,
                                            LanguageMode mode2) {
-  STATIC_ASSERT(LanguageModeSize == 2);
+  static_assert(LanguageModeSize == 2);
   return static_cast<LanguageMode>(static_cast<int>(mode1) |
                                    static_cast<int>(mode2));
 }
@@ -547,8 +652,6 @@ enum class StoreOrigin { kMaybeKeyed, kNamed };
 
 enum class TypeofMode { kInside, kNotInside };
 
-// Use by RecordWrite stubs.
-enum class RememberedSetAction { kOmit, kEmit };
 // Enums used by CEntry.
 enum class SaveFPRegsMode { kIgnore, kSave };
 enum class ArgvMode { kStack, kRegister };
@@ -579,7 +682,7 @@ enum class DeoptimizeKind : uint8_t {
 };
 constexpr DeoptimizeKind kFirstDeoptimizeKind = DeoptimizeKind::kEager;
 constexpr DeoptimizeKind kLastDeoptimizeKind = DeoptimizeKind::kLazy;
-STATIC_ASSERT(static_cast<int>(kFirstDeoptimizeKind) == 0);
+static_assert(static_cast<int>(kFirstDeoptimizeKind) == 0);
 constexpr int kDeoptimizeKindCount = static_cast<int>(kLastDeoptimizeKind) + 1;
 inline size_t hash_value(DeoptimizeKind kind) {
   return static_cast<size_t>(kind);
@@ -636,6 +739,17 @@ constexpr intptr_t kSmiSignMask = static_cast<intptr_t>(
 constexpr int kObjectAlignmentBits = kTaggedSizeLog2;
 constexpr intptr_t kObjectAlignment = 1 << kObjectAlignmentBits;
 constexpr intptr_t kObjectAlignmentMask = kObjectAlignment - 1;
+
+// Object alignment for 8GB pointer compressed heap.
+constexpr intptr_t kObjectAlignment8GbHeap = 8;
+constexpr intptr_t kObjectAlignment8GbHeapMask = kObjectAlignment8GbHeap - 1;
+
+#ifdef V8_COMPRESS_POINTERS_8GB
+static_assert(
+    kObjectAlignment8GbHeap == 2 * kTaggedSize,
+    "When the 8GB heap is enabled, all allocations should be aligned to twice "
+    "the size of a tagged value.");
+#endif
 
 // Desired alignment for system pointers.
 constexpr intptr_t kPointerAlignment = (1 << kSystemPointerSizeLog2);
@@ -765,7 +879,6 @@ class JSObject;
 class LocalIsolate;
 class MacroAssembler;
 class Map;
-class MapSpace;
 class MarkCompactCollector;
 template <typename T>
 class MaybeHandle;
@@ -789,6 +902,8 @@ class CompressedObjectSlot;
 class CompressedMaybeObjectSlot;
 class CompressedMapWordSlot;
 class CompressedHeapObjectSlot;
+class V8HeapCompressionScheme;
+template <typename CompressionScheme>
 class OffHeapCompressedObjectSlot;
 class FullObjectSlot;
 class FullMaybeObjectSlot;
@@ -817,15 +932,16 @@ struct SlotTraits {
   using TObjectSlot = CompressedObjectSlot;
   using TMaybeObjectSlot = CompressedMaybeObjectSlot;
   using THeapObjectSlot = CompressedHeapObjectSlot;
-  using TOffHeapObjectSlot = OffHeapCompressedObjectSlot;
-  using TCodeObjectSlot = OffHeapCompressedObjectSlot;
+  using TOffHeapObjectSlot =
+      OffHeapCompressedObjectSlot<V8HeapCompressionScheme>;
+  using TCodeObjectSlot = OffHeapCompressedObjectSlot<V8HeapCompressionScheme>;
 #else
   using TObjectSlot = FullObjectSlot;
   using TMaybeObjectSlot = FullMaybeObjectSlot;
   using THeapObjectSlot = FullHeapObjectSlot;
   using TOffHeapObjectSlot = OffHeapFullObjectSlot;
   using TCodeObjectSlot = OffHeapFullObjectSlot;
-#endif
+#endif  // V8_COMPRESS_POINTERS
 };
 
 // An ObjectSlot instance describes a kTaggedSize-sized on-heap field ("slot")
@@ -862,35 +978,78 @@ using WeakSlotCallbackWithHeap = bool (*)(Heap* heap, FullObjectSlot pointer);
 // NOTE: SpaceIterator depends on AllocationSpace enumeration values being
 // consecutive.
 enum AllocationSpace {
-  RO_SPACE,       // Immortal, immovable and immutable objects,
-  OLD_SPACE,      // Old generation regular object space.
-  CODE_SPACE,     // Old generation code object space, marked executable.
-  MAP_SPACE,      // Old generation map object space, non-movable.
-  LO_SPACE,       // Old generation large object space.
-  CODE_LO_SPACE,  // Old generation large code object space.
-  NEW_LO_SPACE,   // Young generation large object space.
-  NEW_SPACE,  // Young generation semispaces for regular objects collected with
-              // Scavenger.
+  RO_SPACE,         // Immortal, immovable and immutable objects,
+  NEW_SPACE,        // Young generation space for regular objects collected
+                    // with Scavenger/MinorMC.
+  OLD_SPACE,        // Old generation regular object space.
+  CODE_SPACE,       // Old generation code object space, marked executable.
+  SHARED_SPACE,     // Space shared between multiple isolates. Optional.
+  NEW_LO_SPACE,     // Young generation large object space.
+  LO_SPACE,         // Old generation large object space.
+  CODE_LO_SPACE,    // Old generation large code object space.
+  SHARED_LO_SPACE,  // Space shared between multiple isolates. Optional.
 
   FIRST_SPACE = RO_SPACE,
-  LAST_SPACE = NEW_SPACE,
-  FIRST_MUTABLE_SPACE = OLD_SPACE,
-  LAST_MUTABLE_SPACE = NEW_SPACE,
+  LAST_SPACE = SHARED_LO_SPACE,
+  FIRST_MUTABLE_SPACE = NEW_SPACE,
+  LAST_MUTABLE_SPACE = SHARED_LO_SPACE,
   FIRST_GROWABLE_PAGED_SPACE = OLD_SPACE,
-  LAST_GROWABLE_PAGED_SPACE = MAP_SPACE
+  LAST_GROWABLE_PAGED_SPACE = SHARED_SPACE,
+  FIRST_SWEEPABLE_SPACE = NEW_SPACE,
+  LAST_SWEEPABLE_SPACE = SHARED_SPACE
 };
 constexpr int kSpaceTagSize = 4;
-STATIC_ASSERT(FIRST_SPACE == 0);
+static_assert(FIRST_SPACE == 0);
 
 enum class AllocationType : uint8_t {
   kYoung,      // Regular object allocated in NEW_SPACE or NEW_LO_SPACE
   kOld,        // Regular object allocated in OLD_SPACE or LO_SPACE
   kCode,       // Code object allocated in CODE_SPACE or CODE_LO_SPACE
-  kMap,        // Map object allocated in MAP_SPACE
+  kMap,        // Map object allocated in OLD_SPACE
   kReadOnly,   // Object allocated in RO_SPACE
   kSharedOld,  // Regular object allocated in OLD_SPACE in the shared heap
-  kSharedMap,  // Map object in MAP_SPACE in the shared heap
+  kSharedMap,  // Map object in OLD_SPACE in the shared heap
 };
+
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused. If you add new items here, update
+// src/tools/metrics/histograms/enums.xml in chromium.
+enum class GarbageCollectionReason : int {
+  kUnknown = 0,
+  kAllocationFailure = 1,
+  kAllocationLimit = 2,
+  kContextDisposal = 3,
+  kCountersExtension = 4,
+  kDebugger = 5,
+  kDeserializer = 6,
+  kExternalMemoryPressure = 7,
+  kFinalizeMarkingViaStackGuard = 8,
+  kFinalizeMarkingViaTask = 9,
+  kFullHashtable = 10,
+  kHeapProfiler = 11,
+  kTask = 12,
+  kLastResort = 13,
+  kLowMemoryNotification = 14,
+  kMakeHeapIterable = 15,
+  kMemoryPressure = 16,
+  kMemoryReducer = 17,
+  kRuntime = 18,
+  kSamplingProfiler = 19,
+  kSnapshotCreator = 20,
+  kTesting = 21,
+  kExternalFinalize = 22,
+  kGlobalAllocationLimit = 23,
+  kMeasureMemory = 24,
+  kBackgroundAllocationFailure = 25,
+  kFinalizeMinorMC = 26,
+  kCppHeapAllocationFailure = 27,
+
+  kLastReason = kCppHeapAllocationFailure,
+};
+
+static_assert(kGarbageCollectionReasonMaxValue ==
+                  static_cast<int>(GarbageCollectionReason::kLastReason),
+              "The value of kGarbageCollectionReasonMaxValue is inconsistent.");
 
 inline size_t hash_value(AllocationType kind) {
   return static_cast<uint8_t>(kind);
@@ -931,17 +1090,11 @@ enum AllocationAlignment {
   kDoubleUnaligned
 };
 
-#ifdef V8_HOST_ARCH_32_BIT
-#define USE_ALLOCATION_ALIGNMENT_BOOL true
-#else
-#ifdef V8_COMPRESS_POINTERS
 // TODO(ishell, v8:8875): Consider using aligned allocations once the
 // allocation alignment inconsistency is fixed. For now we keep using
-// unaligned access since both x64 and arm64 architectures (where pointer
-// compression is supported) allow unaligned access to doubles and full words.
-#endif  // V8_COMPRESS_POINTERS
+// tagged aligned (not double aligned) access since all our supported platforms
+// allow tagged-aligned access to doubles and full words.
 #define USE_ALLOCATION_ALIGNMENT_BOOL false
-#endif  // V8_HOST_ARCH_32_BIT
 
 enum class AccessMode { ATOMIC, NON_ATOMIC };
 
@@ -1124,6 +1277,19 @@ constexpr int kIeeeDoubleExponentWordOffset = 0;
 #define OBJECT_POINTER_ALIGN(value) \
   (((value) + ::i::kObjectAlignmentMask) & ~::i::kObjectAlignmentMask)
 
+// OBJECT_POINTER_ALIGN is used to statically align object sizes to
+// kObjectAlignment (which is kTaggedSize). ALIGN_TO_ALLOCATION_ALIGNMENT is
+// used for dynamic allocations to align sizes and addresses to at least 8 bytes
+// when an 8GB+ compressed heap is enabled.
+// TODO(v8:13070): Consider merging this with OBJECT_POINTER_ALIGN.
+#ifdef V8_COMPRESS_POINTERS_8GB
+#define ALIGN_TO_ALLOCATION_ALIGNMENT(value)      \
+  (((value) + ::i::kObjectAlignment8GbHeapMask) & \
+   ~::i::kObjectAlignment8GbHeapMask)
+#else
+#define ALIGN_TO_ALLOCATION_ALIGNMENT(value) (value)
+#endif
+
 // OBJECT_POINTER_PADDING returns the padding size required to align value
 // as a HeapObject pointer
 #define OBJECT_POINTER_PADDING(value) (OBJECT_POINTER_ALIGN(value) - (value))
@@ -1253,9 +1419,7 @@ enum AllocationSiteMode {
 enum class AllocationSiteUpdateMode { kUpdate, kCheckOnly };
 
 // The mips architecture prior to revision 5 has inverted encoding for sNaN.
-#if (V8_TARGET_ARCH_MIPS && !defined(_MIPS_ARCH_MIPS32R6) &&           \
-     (!defined(USE_SIMULATOR) || !defined(_MIPS_TARGET_SIMULATOR))) || \
-    (V8_TARGET_ARCH_MIPS64 && !defined(_MIPS_ARCH_MIPS64R6) &&         \
+#if (V8_TARGET_ARCH_MIPS64 && !defined(_MIPS_ARCH_MIPS64R6) && \
      (!defined(USE_SIMULATOR) || !defined(_MIPS_TARGET_SIMULATOR)))
 constexpr uint32_t kHoleNanUpper32 = 0xFFFF7FFF;
 constexpr uint32_t kHoleNanLower32 = 0xFFFF7FFF;
@@ -1366,7 +1530,7 @@ inline bool IsDynamicVariableMode(VariableMode mode) {
 }
 
 inline bool IsDeclaredVariableMode(VariableMode mode) {
-  STATIC_ASSERT(static_cast<uint8_t>(VariableMode::kLet) ==
+  static_assert(static_cast<uint8_t>(VariableMode::kLet) ==
                 0);  // Implies that mode >= VariableMode::kLet.
   return mode <= VariableMode::kVar;
 }
@@ -1387,7 +1551,7 @@ inline bool IsConstVariableMode(VariableMode mode) {
 }
 
 inline bool IsLexicalVariableMode(VariableMode mode) {
-  STATIC_ASSERT(static_cast<uint8_t>(VariableMode::kLet) ==
+  static_assert(static_cast<uint8_t>(VariableMode::kLet) ==
                 0);  // Implies that mode >= VariableMode::kLet.
   return mode <= VariableMode::kLastLexicalVariableMode;
 }
@@ -1499,7 +1663,7 @@ inline uint32_t ObjectHash(Address address) {
 //
 //   kSignedSmall -> kSignedSmallInputs -> kNumber  -> kNumberOrOddball -> kAny
 //                                                     kString          -> kAny
-//                                                     kBigInt          -> kAny
+//                                        kBigInt64 -> kBigInt          -> kAny
 //
 // Technically we wouldn't need the separation between the kNumber and the
 // kNumberOrOddball values here, since for binary operations, we always
@@ -1516,7 +1680,8 @@ class BinaryOperationFeedback {
     kNumber = 0x7,
     kNumberOrOddball = 0xF,
     kString = 0x10,
-    kBigInt = 0x20,
+    kBigInt64 = 0x20,
+    kBigInt = 0x60,
     kAny = 0x7F
   };
 };
@@ -1575,13 +1740,13 @@ enum class ForInFeedback : uint8_t {
   kEnumCacheKeys = 0x3,
   kAny = 0x7
 };
-STATIC_ASSERT((static_cast<int>(ForInFeedback::kNone) |
+static_assert((static_cast<int>(ForInFeedback::kNone) |
                static_cast<int>(ForInFeedback::kEnumCacheKeysAndIndices)) ==
               static_cast<int>(ForInFeedback::kEnumCacheKeysAndIndices));
-STATIC_ASSERT((static_cast<int>(ForInFeedback::kEnumCacheKeysAndIndices) |
+static_assert((static_cast<int>(ForInFeedback::kEnumCacheKeysAndIndices) |
                static_cast<int>(ForInFeedback::kEnumCacheKeys)) ==
               static_cast<int>(ForInFeedback::kEnumCacheKeys));
-STATIC_ASSERT((static_cast<int>(ForInFeedback::kEnumCacheKeys) |
+static_assert((static_cast<int>(ForInFeedback::kEnumCacheKeys) |
                static_cast<int>(ForInFeedback::kAny)) ==
               static_cast<int>(ForInFeedback::kAny));
 
@@ -1691,9 +1856,9 @@ enum class TieringState : int32_t {
 // To efficiently check whether a marker is kNone or kInProgress using a single
 // mask, we expect the kNone to be 0 and kInProgress to be 1 so that we can
 // mask off the lsb for checking.
-STATIC_ASSERT(static_cast<int>(TieringState::kNone) == 0b00 &&
+static_assert(static_cast<int>(TieringState::kNone) == 0b00 &&
               static_cast<int>(TieringState::kInProgress) == 0b01);
-STATIC_ASSERT(static_cast<int>(TieringState::kLastTieringState) <= 0b111);
+static_assert(static_cast<int>(TieringState::kLastTieringState) <= 0b111);
 static constexpr uint32_t kNoneOrInProgressMask = 0b110;
 
 #define V(Name, Value)                          \
@@ -1702,6 +1867,15 @@ static constexpr uint32_t kNoneOrInProgressMask = 0b110;
   }
 TIERING_STATE_LIST(V)
 #undef V
+
+constexpr bool IsRequestMaglev(TieringState state) {
+  return IsRequestMaglev_Concurrent(state) ||
+         IsRequestMaglev_Synchronous(state);
+}
+constexpr bool IsRequestTurbofan(TieringState state) {
+  return IsRequestTurbofan_Concurrent(state) ||
+         IsRequestTurbofan_Synchronous(state);
+}
 
 constexpr const char* ToString(TieringState marker) {
   switch (marker) {
@@ -1799,7 +1973,7 @@ enum IsolateAddressId {
   V(TrapFloatUnrepresentable)      \
   V(TrapFuncSigMismatch)           \
   V(TrapDataSegmentOutOfBounds)    \
-  V(TrapElemSegmentDropped)        \
+  V(TrapElementSegmentOutOfBounds) \
   V(TrapTableOutOfBounds)          \
   V(TrapRethrowNull)               \
   V(TrapNullDereference)           \

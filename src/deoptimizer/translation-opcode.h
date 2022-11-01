@@ -30,10 +30,15 @@ namespace internal {
   V(INT32_STACK_SLOT, 1)                                  \
   V(INT64_REGISTER, 1)                                    \
   V(INT64_STACK_SLOT, 1)                                  \
+  V(SIGNED_BIGINT64_REGISTER, 1)                          \
+  V(SIGNED_BIGINT64_STACK_SLOT, 1)                        \
+  V(UNSIGNED_BIGINT64_REGISTER, 1)                        \
+  V(UNSIGNED_BIGINT64_STACK_SLOT, 1)                      \
   V(INTERPRETED_FRAME, 5)                                 \
   V(JAVA_SCRIPT_BUILTIN_CONTINUATION_FRAME, 3)            \
   V(JAVA_SCRIPT_BUILTIN_CONTINUATION_WITH_CATCH_FRAME, 3) \
   IF_WASM(V, JS_TO_WASM_BUILTIN_CONTINUATION_FRAME, 4)    \
+  V(OPTIMIZED_OUT, 0)                                     \
   V(LITERAL, 1)                                           \
   V(REGISTER, 1)                                          \
   V(STACK_SLOT, 1)                                        \
@@ -47,7 +52,12 @@ enum class TranslationOpcode {
 #undef CASE
 };
 
-constexpr TranslationOpcode TranslationOpcodeFromInt(int i) {
+#define PLUS_ONE(...) +1
+static constexpr int kNumTranslationOpcodes =
+    0 TRANSLATION_OPCODE_LIST(PLUS_ONE);
+#undef PLUS_ONE
+
+constexpr TranslationOpcode TranslationOpcodeFromInt(uint32_t i) {
   return static_cast<TranslationOpcode>(i);
 }
 

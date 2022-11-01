@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --experimental-wasm-threads
-
 d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
 
 const kMemtypeSize32 = 4;
@@ -97,7 +95,13 @@ function VerifyBoundsCheck(func, memtype_size) {
   // Test out of bounds at boundary
   for (let i = memory.buffer.byteLength - memtype_size + 1;
        i < memory.buffer.byteLength + memtype_size + 4; i++) {
-    assertTraps(kTrapMemOutOfBounds, () => func(i, 5, 10));
+    assertTrapsOneOf(
+      // If an underlying platform uses traps for a bounds check,
+      // kTrapUnalignedAccess will be thrown before kTrapMemOutOfBounds.
+      // Otherwise, kTrapMemOutOfBounds will be first.
+      [kTrapMemOutOfBounds, kTrapUnalignedAccess],
+      () => func(i, 5, 10)
+    );
   }
   // Test out of bounds at maximum + 1
   assertTraps(kTrapMemOutOfBounds, () => func((maxSize + 1) * kPageSize, 5, 1));

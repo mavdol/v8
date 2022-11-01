@@ -75,9 +75,10 @@ TEST(HeapObjectIterator) {
 
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    CHECK_IMPLIES(!FLAG_enable_third_party_heap, !ReadOnlyHeap::Contains(obj));
+    CHECK_IMPLIES(!v8_flags.enable_third_party_heap,
+                  !ReadOnlyHeap::Contains(obj));
     CHECK(CcTest::heap()->Contains(obj));
-    if (sample_object == obj) seen_sample_object = true;
+    if (sample_object.SafeEquals(obj)) seen_sample_object = true;
   }
   CHECK(seen_sample_object);
 }
@@ -92,7 +93,7 @@ TEST(CombinedHeapObjectIterator) {
   for (HeapObject obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
     CHECK(IsValidHeapObject(CcTest::heap(), obj));
-    if (sample_object == obj) seen_sample_object = true;
+    if (sample_object.SafeEquals(obj)) seen_sample_object = true;
   }
   CHECK(seen_sample_object);
 }
@@ -102,7 +103,6 @@ TEST(PagedSpaceIterator) {
   PagedSpaceIterator iterator(heap);
   CHECK_EQ(iterator.Next(), reinterpret_cast<PagedSpace*>(heap->old_space()));
   CHECK_EQ(iterator.Next(), reinterpret_cast<PagedSpace*>(heap->code_space()));
-  CHECK_EQ(iterator.Next(), reinterpret_cast<PagedSpace*>(heap->map_space()));
   for (int i = 0; i < 20; i++) {
     CHECK_NULL(iterator.Next());
   }

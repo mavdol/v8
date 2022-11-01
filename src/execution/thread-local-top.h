@@ -10,6 +10,7 @@
 #include "include/v8-unwinder.h"
 #include "src/common/globals.h"
 #include "src/execution/thread-id.h"
+#include "src/heap/base/stack.h"
 #include "src/objects/contexts.h"
 #include "src/utils/utils.h"
 
@@ -29,7 +30,7 @@ class ThreadLocalTop {
   // TODO(all): This is not particularly beautiful. We should probably
   // refactor this to really consist of just Addresses and 32-bit
   // integer fields.
-  static constexpr uint32_t kSizeInBytes = 25 * kSystemPointerSize;
+  static constexpr uint32_t kSizeInBytes = 27 * kSystemPointerSize;
 
   // Does early low-level initialization that does not depend on the
   // isolate being present.
@@ -98,7 +99,7 @@ class ThreadLocalTop {
   // be cleaner to make it an "Address raw_context_", and construct a Context
   // object in the getter. Same for {pending_handler_context_} below. In the
   // meantime, assert that the memory layout is the same.
-  STATIC_ASSERT(sizeof(Context) == kSystemPointerSize);
+  static_assert(sizeof(Context) == kSystemPointerSize);
   Context context_;
   std::atomic<ThreadId> thread_id_;
   Object pending_exception_;
@@ -146,6 +147,9 @@ class ThreadLocalTop {
 
   // Address of the thread-local "thread in wasm" flag.
   Address thread_in_wasm_flag_address_;
+
+  // Stack information.
+  ::heap::base::Stack stack_;
 };
 
 }  // namespace internal

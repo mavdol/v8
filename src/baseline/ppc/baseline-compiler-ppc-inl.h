@@ -14,6 +14,11 @@ namespace baseline {
 
 #define __ basm_.
 
+// A builtin call/jump mode that is used then short builtin calls feature is
+// not enabled.
+constexpr BuiltinCallJumpMode kFallbackBuiltinCallJumpModeForBaseline =
+    BuiltinCallJumpMode::kIndirect;
+
 void BaselineCompiler::Prologue() {
   ASM_CODE_COMMENT(&masm_);
   __ masm()->EnterFrame(StackFrame::BASELINE);
@@ -27,14 +32,12 @@ void BaselineCompiler::Prologue() {
   PrologueFillFrame();
 }
 
-void BaselineCompiler::PrologueFillFrame() { PrologueFillFrame(); }
-
 void BaselineCompiler::PrologueFillFrame() {
   ASM_CODE_COMMENT(&masm_);
   // Inlined register frame fill
   interpreter::Register new_target_or_generator_register =
       bytecode_->incoming_new_target_or_generator_register();
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     __ masm()->CompareRoot(kInterpreterAccumulatorRegister,
                            RootIndex::kUndefinedValue);
     __ masm()->Assert(eq, AbortReason::kUnexpectedValue);
@@ -77,8 +80,8 @@ void BaselineCompiler::PrologueFillFrame() {
     for (int i = 0; i < kLoopUnrollSize; ++i) {
       __ Push(kInterpreterAccumulatorRegister);
     }
-    __ masm()->SubS64(scratch, scratch, Operand(1));
-    __ masm()->b(gt, &loop);
+    __ masm()->SubS64(scratch, scratch, Operand(1), r0, LeaveOE, SetRC);
+    __ masm()->bgt(&loop, cr0);
   }
 }
 

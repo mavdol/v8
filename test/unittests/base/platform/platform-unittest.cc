@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstring>
 
+#include "include/v8-function.h"
 #include "src/base/build_config.h"
+#include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 #ifdef V8_TARGET_OS_LINUX
@@ -236,5 +238,68 @@ TEST(StackTest, StackVariableInBounds) {
 }
 #endif  // !V8_OS_FUCHSIA
 
+using SetDataReadOnlyTest = ::testing::Test;
+
+TEST_F(SetDataReadOnlyTest, SetDataReadOnly) {
+  static struct alignas(kMaxPageSize) TestData {
+    int x;
+    int y;
+  } test_data;
+  static_assert(alignof(TestData) == kMaxPageSize);
+  static_assert(sizeof(TestData) == kMaxPageSize);
+
+  test_data.x = 25;
+  test_data.y = 41;
+
+  OS::SetDataReadOnly(&test_data, sizeof(test_data));
+  CHECK_EQ(25, test_data.x);
+  CHECK_EQ(41, test_data.y);
+
+  ASSERT_DEATH_IF_SUPPORTED(test_data.x = 1, "");
+  ASSERT_DEATH_IF_SUPPORTED(test_data.y = 0, "");
+}
+
 }  // namespace base
+
+namespace {
+
+#ifdef V8_CC_GNU
+
+static uintptr_t sp_addr = 0;
+
+void GetStackPointerCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  GET_STACK_POINTER_TO(sp_addr);
+  args.GetReturnValue().Set(v8::Integer::NewFromUnsigned(
+      args.GetIsolate(), static_cast<uint32_t>(sp_addr)));
+}
+
+using PlatformTest = v8::TestWithIsolate;
+TEST_F(PlatformTest, StackAlignment) {
+  Local<ObjectTemplate> global_template = ObjectTemplate::New(isolate());
+  global_template->Set(
+      isolate(), "get_stack_pointer",
+      FunctionTemplate::New(isolate(), GetStackPointerCallback));
+
+  Local<Context> context = Context::New(isolate(), nullptr, global_template);
+  Context::Scope context_scope(context);
+  TryRunJS(
+      "function foo() {"
+      "  return get_stack_pointer();"
+      "}");
+
+  Local<Object> global_object = context->Global();
+  Local<Function> foo = v8::Local<v8::Function>::Cast(
+      global_object->Get(isolate()->GetCurrentContext(), NewString("foo"))
+          .ToLocalChecked());
+
+  Local<v8::Value> result =
+      foo->Call(isolate()->GetCurrentContext(), global_object, 0, nullptr)
+          .ToLocalChecked();
+  CHECK_EQ(0u, result->Uint32Value(isolate()->GetCurrentContext()).FromJust() %
+                   base::OS::ActivationFrameAlignment());
+}
+#endif  // V8_CC_GNU
+
+}  // namespace
+
 }  // namespace v8

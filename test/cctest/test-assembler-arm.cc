@@ -31,14 +31,12 @@
 #include "src/base/utils/random-number-generator.h"
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/macro-assembler.h"
-#include "src/diagnostics/disassembler.h"
 #include "src/execution/simulator.h"
 #include "src/heap/factory.h"
-#include "src/init/v8.h"
 #include "src/utils/ostreams.h"
 #include "test/cctest/assembler-helper-arm.h"
 #include "test/cctest/cctest.h"
-#include "test/cctest/compiler/value-helper.h"
+#include "test/common/value-helper.h"
 
 namespace v8 {
 namespace internal {
@@ -3369,7 +3367,7 @@ TEST(ARMv8_vsel) {
 #endif
     auto f = GeneratedCode<F_ippii>::FromCode(*code);
 
-    STATIC_ASSERT(kResultPass == -kResultFail);
+    static_assert(kResultPass == -kResultFail);
 #define CHECK_VSEL(n, z, c, v, vseleq, vselge, vselgt, vselvs)     \
   do {                                                             \
     ResultsF32 results_f32;                                        \

@@ -9,7 +9,7 @@
 #include "src/codegen/code-factory.h"
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/compiler/access-builder.h"
-#include "src/compiler/allocation-builder.h"
+#include "src/compiler/common-operator.h"
 #include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/graph-assembler.h"
 #include "src/compiler/js-graph.h"
@@ -111,14 +111,11 @@ class JSBinopReduction final {
       JSHeapBroker* broker = lowering_->broker();
       if (m.right().HasResolvedValue() && m.right().Ref(broker).IsString()) {
         StringRef right_string = m.right().Ref(broker).AsString();
-        if (right_string.length().has_value() &&
-            right_string.length().value() >= ConsString::kMinLength)
-          return true;
+        if (right_string.length() >= ConsString::kMinLength) return true;
       }
       if (m.left().HasResolvedValue() && m.left().Ref(broker).IsString()) {
         StringRef left_string = m.left().Ref(broker).AsString();
-        if (left_string.length().has_value() &&
-            left_string.length().value() >= ConsString::kMinLength) {
+        if (left_string.length() >= ConsString::kMinLength) {
           // The invariant for ConsString requires the left hand side to be
           // a sequential or external string if the right hand side is the
           // empty string. Since we don't know anything about the right hand
@@ -845,7 +842,7 @@ Reduction JSTypedLowering::ReduceJSEqual(Node* node) {
     //    then ObjectIsUndetectable(left)
     // else ReferenceEqual(left, right)
 #define __ gasm.
-    JSGraphAssembler gasm(jsgraph(), jsgraph()->zone());
+    JSGraphAssembler gasm(jsgraph(), jsgraph()->zone(), BranchSemantics::kJS);
     gasm.InitializeEffectControl(r.effect(), r.control());
 
     auto lhs = TNode<Object>::UncheckedCast(r.left());
@@ -1527,7 +1524,7 @@ void ReduceBuiltin(JSGraph* jsgraph, Node* node, Builtin builtin, int arity,
   Node* new_target;
   Zone* zone = jsgraph->zone();
   if (node->opcode() == IrOpcode::kJSConstruct) {
-    STATIC_ASSERT(JSCallNode::ReceiverIndex() ==
+    static_assert(JSCallNode::ReceiverIndex() ==
                   JSConstructNode::NewTargetIndex());
     new_target = JSConstructNode{node}.new_target();
     node->ReplaceInput(JSConstructNode::NewTargetIndex(),
@@ -1629,8 +1626,8 @@ Reduction JSTypedLowering::ReduceJSConstruct(Node* node) {
         isolate(), function.shared().construct_as_builtin()
                        ? Builtin::kJSBuiltinsConstructStub
                        : Builtin::kJSConstructStubGeneric);
-    STATIC_ASSERT(JSConstructNode::TargetIndex() == 0);
-    STATIC_ASSERT(JSConstructNode::NewTargetIndex() == 1);
+    static_assert(JSConstructNode::TargetIndex() == 0);
+    static_assert(JSConstructNode::NewTargetIndex() == 1);
     node->RemoveInput(n.FeedbackVectorIndex());
     node->InsertInput(graph()->zone(), 0,
                       jsgraph()->HeapConstant(callable.code()));
@@ -1873,16 +1870,17 @@ Reduction JSTypedLowering::ReduceJSForInNext(Node* node) {
       node->ReplaceInput(2, effect);
       node->ReplaceInput(3, control);
       node->TrimInputCount(4);
-      NodeProperties::ChangeOp(
-          node,
-          simplified()->LoadElement(AccessBuilder::ForFixedArrayElement()));
-      NodeProperties::SetType(node, Type::InternalizedString());
+      ElementAccess access =
+          AccessBuilder::ForJSForInCacheArrayElement(n.Parameters().mode());
+      NodeProperties::ChangeOp(node, simplified()->LoadElement(access));
+      NodeProperties::SetType(node, access.type);
       break;
     }
     case ForInMode::kGeneric: {
       // Load the next {key} from the {cache_array}.
       Node* key = effect = graph()->NewNode(
-          simplified()->LoadElement(AccessBuilder::ForFixedArrayElement()),
+          simplified()->LoadElement(AccessBuilder::ForJSForInCacheArrayElement(
+              n.Parameters().mode())),
           cache_array, index, effect, control);
 
       // Check if the expected map still matches that of the {receiver}.
@@ -1982,7 +1980,7 @@ Reduction JSTypedLowering::ReduceJSForInPrepare(Node* node) {
       Node* bit_field3 = effect = graph()->NewNode(
           simplified()->LoadField(AccessBuilder::ForMapBitField3()), enumerator,
           effect, control);
-      STATIC_ASSERT(Map::Bits3::EnumLengthBits::kShift == 0);
+      static_assert(Map::Bits3::EnumLengthBits::kShift == 0);
       cache_length = graph()->NewNode(
           simplified()->NumberBitwiseAnd(), bit_field3,
           jsgraph()->Constant(Map::Bits3::EnumLengthBits::kMask));
@@ -2017,7 +2015,7 @@ Reduction JSTypedLowering::ReduceJSForInPrepare(Node* node) {
         Node* bit_field3 = etrue = graph()->NewNode(
             simplified()->LoadField(AccessBuilder::ForMapBitField3()),
             enumerator, etrue, if_true);
-        STATIC_ASSERT(Map::Bits3::EnumLengthBits::kShift == 0);
+        static_assert(Map::Bits3::EnumLengthBits::kShift == 0);
         cache_length_true = graph()->NewNode(
             simplified()->NumberBitwiseAnd(), bit_field3,
             jsgraph()->Constant(Map::Bits3::EnumLengthBits::kMask));

@@ -97,7 +97,7 @@ v8::MaybeLocal<v8::Value> V8InspectorImpl::compileAndRunInternalScript(
   if (!v8::debug::CompileInspectorScript(m_isolate, source)
            .ToLocal(&unboundScript))
     return v8::MaybeLocal<v8::Value>();
-  v8::MicrotasksScope microtasksScope(m_isolate,
+  v8::MicrotasksScope microtasksScope(context,
                                       v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Context::Scope contextScope(context);
   v8::Isolate::SafeForTerminationScope allowTermination(m_isolate);
@@ -187,7 +187,8 @@ v8::MaybeLocal<v8::Context> V8InspectorImpl::contextById(int contextId) {
 V8DebuggerId V8InspectorImpl::uniqueDebuggerId(int contextId) {
   InspectedContext* context = getContext(contextId);
   internal::V8DebuggerId unique_id;
-  if (context) unique_id = context->uniqueId();
+  if (context) unique_id = m_debugger->debuggerIdFor(context->contextGroupId());
+
   return unique_id.toV8DebuggerId();
 }
 
@@ -532,7 +533,7 @@ V8InspectorImpl::getAssociatedExceptionDataForProtocol(
   if (!exceptionMetaDataContext().ToLocal(&context)) return nullptr;
 
   v8::TryCatch tryCatch(m_isolate);
-  v8::MicrotasksScope microtasksScope(m_isolate,
+  v8::MicrotasksScope microtasksScope(context,
                                       v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Context::Scope contextScope(context);
   std::unique_ptr<protocol::DictionaryValue> jsonObject;

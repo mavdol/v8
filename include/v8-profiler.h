@@ -175,6 +175,32 @@ class V8_EXPORT CpuProfileNode {
   static const int kNoColumnNumberInfo = Message::kNoColumnInfo;
 };
 
+/**
+ * An interface for exporting data from V8, using "push" model.
+ */
+class V8_EXPORT OutputStream {
+ public:
+  enum WriteResult { kContinue = 0, kAbort = 1 };
+  virtual ~OutputStream() = default;
+  /** Notify about the end of stream. */
+  virtual void EndOfStream() = 0;
+  /** Get preferred output chunk size. Called only once. */
+  virtual int GetChunkSize() { return 1024; }
+  /**
+   * Writes the next chunk of snapshot data into the stream. Writing
+   * can be stopped by returning kAbort as function result. EndOfStream
+   * will not be called in case writing was aborted.
+   */
+  virtual WriteResult WriteAsciiChunk(char* data, int size) = 0;
+  /**
+   * Writes the next chunk of heap stats data into the stream. Writing
+   * can be stopped by returning kAbort as function result. EndOfStream
+   * will not be called in case writing was aborted.
+   */
+  virtual WriteResult WriteHeapStatsChunk(HeapStatsUpdate* data, int count) {
+    return kAbort;
+  }
+};
 
 /**
  * CpuProfile contains a CPU profile in a form of top-down call tree
@@ -182,6 +208,9 @@ class V8_EXPORT CpuProfileNode {
  */
 class V8_EXPORT CpuProfile {
  public:
+  enum SerializationFormat {
+    kJSON = 0  // See format description near 'Serialize' method.
+  };
   /** Returns CPU profile title. */
   Local<String> GetTitle() const;
 
@@ -235,6 +264,25 @@ class V8_EXPORT CpuProfile {
    * All pointers to nodes previously returned become invalid.
    */
   void Delete();
+
+  /**
+   * Prepare a serialized representation of the profile. The result
+   * is written into the stream provided in chunks of specified size.
+   *
+   * For the JSON format, heap contents are represented as an object
+   * with the following structure:
+   *
+   *  {
+   *    nodes: [nodes array],
+   *    startTime: number,
+   *    endTime: number
+   *    samples: [strings array]
+   *    timeDeltas: [numbers array]
+   *  }
+   *
+   */
+  void Serialize(OutputStream* stream,
+                 SerializationFormat format = kJSON) const;
 };
 
 enum CpuProfilingMode {
@@ -331,6 +379,9 @@ class V8_EXPORT CpuProfilingOptions {
       unsigned max_samples = kNoSampleLimit, int sampling_interval_us = 0,
       MaybeLocal<Context> filter_context = MaybeLocal<Context>());
 
+  CpuProfilingOptions(CpuProfilingOptions&&) = default;
+  CpuProfilingOptions& operator=(CpuProfilingOptions&&) = default;
+
   CpuProfilingMode mode() const { return mode_; }
   unsigned max_samples() const { return max_samples_; }
   int sampling_interval_us() const { return sampling_interval_us_; }
@@ -344,7 +395,7 @@ class V8_EXPORT CpuProfilingOptions {
   CpuProfilingMode mode_;
   unsigned max_samples_;
   int sampling_interval_us_;
-  CopyablePersistentTraits<Context>::CopyablePersistent filter_context_;
+  Global<Context> filter_context_;
 };
 
 /**
@@ -571,37 +622,6 @@ class V8_EXPORT HeapGraphNode {
 
   /** Retrieves a child by index. */
   const HeapGraphEdge* GetChild(int index) const;
-};
-
-
-/**
- * An interface for exporting data from V8, using "push" model.
- */
-class V8_EXPORT OutputStream {
- public:
-  enum WriteResult {
-    kContinue = 0,
-    kAbort = 1
-  };
-  virtual ~OutputStream() = default;
-  /** Notify about the end of stream. */
-  virtual void EndOfStream() = 0;
-  /** Get preferred output chunk size. Called only once. */
-  virtual int GetChunkSize() { return 1024; }
-  /**
-   * Writes the next chunk of snapshot data into the stream. Writing
-   * can be stopped by returning kAbort as function result. EndOfStream
-   * will not be called in case writing was aborted.
-   */
-  virtual WriteResult WriteAsciiChunk(char* data, int size) = 0;
-  /**
-   * Writes the next chunk of heap stats data into the stream. Writing
-   * can be stopped by returning kAbort as function result. EndOfStream
-   * will not be called in case writing was aborted.
-   */
-  virtual WriteResult WriteHeapStatsChunk(HeapStatsUpdate* data, int count) {
-    return kAbort;
-  }
 };
 
 /**
@@ -900,6 +920,8 @@ class V8_EXPORT HeapProfiler {
   enum SamplingFlags {
     kSamplingNoFlags = 0,
     kSamplingForceGC = 1 << 0,
+    kSamplingIncludeObjectsCollectedByMajorGC = 1 << 1,
+    kSamplingIncludeObjectsCollectedByMinorGC = 1 << 2,
   };
 
   /**
@@ -1094,10 +1116,8 @@ class V8_EXPORT HeapProfiler {
    * |stack_depth| parameter controls the maximum number of stack frames to be
    * captured on each allocation.
    *
-   * NOTE: This is a proof-of-concept at this point. Right now we only sample
-   * newspace allocations. Support for paged space allocation (e.g. pre-tenured
-   * objects, large objects, code objects, etc.) and native allocations
-   * doesn't exist yet, but is anticipated in the future.
+   * NOTE: Support for native allocations doesn't exist yet, but is anticipated
+   * in the future.
    *
    * Objects allocated before the sampling is started will not be included in
    * the profile.
@@ -1160,18 +1180,18 @@ struct HeapStatsUpdate {
   uint32_t size;  // New value of size field for the interval with this index.
 };
 
-#define CODE_EVENTS_LIST(V) \
-  V(Builtin)                \
-  V(Callback)               \
-  V(Eval)                   \
-  V(Function)               \
-  V(InterpretedFunction)    \
-  V(Handler)                \
-  V(BytecodeHandler)        \
-  V(LazyCompile)            \
-  V(RegExp)                 \
-  V(Script)                 \
-  V(Stub)                   \
+#define CODE_EVENTS_LIST(V)                          \
+  V(Builtin)                                         \
+  V(Callback)                                        \
+  V(Eval)                                            \
+  V(Function)                                        \
+  V(InterpretedFunction)                             \
+  V(Handler)                                         \
+  V(BytecodeHandler)                                 \
+  V(LazyCompile) /* Unused, use kFunction instead */ \
+  V(RegExp)                                          \
+  V(Script)                                          \
+  V(Stub)                                            \
   V(Relocation)
 
 /**

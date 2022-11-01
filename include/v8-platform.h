@@ -158,9 +158,10 @@ class TaskRunner {
 class JobDelegate {
  public:
   /**
-   * Returns true if this thread should return from the worker task on the
+   * Returns true if this thread *must* return from the worker task on the
    * current thread ASAP. Workers should periodically invoke ShouldYield (or
    * YieldIfNeeded()) as often as is reasonable.
+   * After this method returned true, ShouldYield must not be called again.
    */
   virtual bool ShouldYield() = 0;
 
@@ -922,11 +923,9 @@ class Platform {
 
   /**
    * Allows the embedder to manage memory page allocations.
+   * Returning nullptr will cause V8 to use the default page allocator.
    */
-  virtual PageAllocator* GetPageAllocator() {
-    // TODO(bbudge) Make this abstract after all embedders implement this.
-    return nullptr;
-  }
+  virtual PageAllocator* GetPageAllocator() = 0;
 
   /**
    * Allows the embedder to specify a custom allocator used for zones.
@@ -943,21 +942,7 @@ class Platform {
    * error.
    * Embedder overrides of this function must NOT call back into V8.
    */
-  virtual void OnCriticalMemoryPressure() {
-    // TODO(bbudge) Remove this when embedders override the following method.
-    // See crbug.com/634547.
-  }
-
-  /**
-   * Enables the embedder to respond in cases where V8 can't allocate large
-   * memory regions. The |length| parameter is the amount of memory needed.
-   * Returns true if memory is now available. Returns false if no memory could
-   * be made available. V8 will retry allocations until this method returns
-   * false.
-   *
-   * Embedder overrides of this function must NOT call back into V8.
-   */
-  virtual bool OnCriticalMemoryPressure(size_t length) { return false; }
+  virtual void OnCriticalMemoryPressure() {}
 
   /**
    * Gets the number of worker threads used by
@@ -1055,16 +1040,28 @@ class Platform {
    * thread (A=>B/B=>A deadlock) and [2] JobTask::Run or
    * JobTask::GetMaxConcurrency may be invoked synchronously from JobHandle
    * (B=>JobHandle::foo=>B deadlock).
+   */
+  virtual std::unique_ptr<JobHandle> PostJob(
+      TaskPriority priority, std::unique_ptr<JobTask> job_task) {
+    auto handle = CreateJob(priority, std::move(job_task));
+    handle->NotifyConcurrencyIncrease();
+    return handle;
+  }
+
+  /**
+   * Creates and returns a JobHandle associated with a Job. Unlike PostJob(),
+   * this doesn't immediately schedules |worker_task| to run; the Job is then
+   * scheduled by calling either NotifyConcurrencyIncrease() or Join().
    *
-   * A sufficient PostJob() implementation that uses the default Job provided in
-   * libplatform looks like:
-   *  std::unique_ptr<JobHandle> PostJob(
+   * A sufficient CreateJob() implementation that uses the default Job provided
+   * in libplatform looks like:
+   *  std::unique_ptr<JobHandle> CreateJob(
    *      TaskPriority priority, std::unique_ptr<JobTask> job_task) override {
    *    return v8::platform::NewDefaultJobHandle(
    *        this, priority, std::move(job_task), NumberOfWorkerThreads());
    * }
    */
-  virtual std::unique_ptr<JobHandle> PostJob(
+  virtual std::unique_ptr<JobHandle> CreateJob(
       TaskPriority priority, std::unique_ptr<JobTask> job_task) = 0;
 
   /**

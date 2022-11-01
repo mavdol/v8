@@ -23,7 +23,7 @@ namespace {
 bool IsInStringInstanceTypeList(InstanceType instance_type) {
   switch (instance_type) {
 #define ASSERT_INSTANCE_TYPE(type, ...) \
-  STATIC_ASSERT(InstanceType::type < InstanceType::FIRST_NONSTRING_TYPE);
+  static_assert(InstanceType::type < InstanceType::FIRST_NONSTRING_TYPE);
     STRING_TYPE_LIST(ASSERT_INSTANCE_TYPE)
 #undef ASSERT_INSTANCE_TYPE
 #define TEST_INSTANCE_TYPE(type, ...) case InstanceType::type:
@@ -108,7 +108,7 @@ TEST_F(ObjectWithIsolate, DictionaryGrowth) {
 
   // This test documents the expected growth behavior of a dictionary getting
   // elements added to it one by one.
-  STATIC_ASSERT(HashTableBase::kMinCapacity == 4);
+  static_assert(HashTableBase::kMinCapacity == 4);
   uint32_t i = 1;
   // 3 elements fit into the initial capacity.
   for (; i <= 3; i++) {
@@ -688,6 +688,72 @@ TEST_F(ObjectTest, ConstructorInstanceTypes) {
         break;
     }
   }
+}
+
+TEST_F(ObjectTest, AddDataPropertyNameCollision) {
+  v8::HandleScope scope(isolate());
+  Factory* factory = i_isolate()->factory();
+
+  Handle<JSObject> object =
+      factory->NewJSObject(i_isolate()->object_function());
+
+  Handle<String> key = factory->NewStringFromStaticChars("key_string");
+  Handle<Object> value1(Smi::FromInt(0), i_isolate());
+  Handle<Object> value2 = factory->NewStringFromAsciiChecked("corrupt");
+
+  LookupIterator outer_it(i_isolate(), object, key, object,
+                          LookupIterator::OWN_SKIP_INTERCEPTOR);
+  {
+    LookupIterator inner_it(i_isolate(), object, key, object,
+                            LookupIterator::OWN_SKIP_INTERCEPTOR);
+
+    CHECK(Object::AddDataProperty(&inner_it, value1, NONE,
+                                  Just(ShouldThrow::kThrowOnError),
+                                  StoreOrigin::kNamed)
+              .IsJust());
+  }
+  EXPECT_DEATH_IF_SUPPORTED(
+      Object::AddDataProperty(&outer_it, value2, NONE,
+                              Just(ShouldThrow::kThrowOnError),
+                              StoreOrigin::kNamed)
+          .IsJust(),
+      "");
+}
+
+TEST_F(ObjectTest, AddDataPropertyNameCollisionDeprecatedMap) {
+  v8::HandleScope scope(isolate());
+  Factory* factory = i_isolate()->factory();
+
+  // Create two identical maps
+  RunJS(
+      "a = {'regular_prop':5};"
+      "b = {'regular_prop':5};");
+
+  Handle<JSObject> a = Handle<JSObject>::cast(v8::Utils::OpenHandle(
+      *context()->Global()->Get(context(), NewString("a")).ToLocalChecked()));
+  Handle<JSObject> b = Handle<JSObject>::cast(v8::Utils::OpenHandle(
+      *context()->Global()->Get(context(), NewString("b")).ToLocalChecked()));
+
+  CHECK(a->map() == b->map());
+
+  Handle<String> key = factory->NewStringFromStaticChars("corrupted_prop");
+  Handle<Object> value = factory->NewStringFromAsciiChecked("corrupt");
+  LookupIterator it(i_isolate(), a, key, a,
+                    LookupIterator::OWN_SKIP_INTERCEPTOR);
+
+  // Transition `a`'s map to deprecated
+  RunJS(
+      "a.corrupted_prop = 1;"
+      "b.regular_prop = 5.5;");
+
+  CHECK(a->map().is_deprecated());
+
+  EXPECT_DEATH_IF_SUPPORTED(
+      Object::AddDataProperty(&it, value, NONE,
+                              Just(ShouldThrow::kThrowOnError),
+                              StoreOrigin::kNamed)
+          .IsJust(),
+      "");
 }
 
 }  // namespace internal

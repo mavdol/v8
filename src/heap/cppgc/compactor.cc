@@ -199,14 +199,14 @@ void MovableReferences::RelocateInteriorReferences(Address from, Address to,
     if (!interior_it->second) {
       // Update the interior reference value, so that when the object the slot
       // is pointing to is moved, it can re-use this value.
-      Address refernece = to + offset;
-      interior_it->second = refernece;
+      Address reference = to + offset;
+      interior_it->second = reference;
 
       // If the |slot|'s content is pointing into the region [from, from +
       // size) we are dealing with an interior pointer that does not point to
       // a valid HeapObjectHeader. Such references need to be fixed up
       // immediately.
-      Address& reference_contents = *reinterpret_cast<Address*>(refernece);
+      Address& reference_contents = *reinterpret_cast<Address*>(reference);
       if (reference_contents > from && reference_contents < (from + size)) {
         reference_contents = reference_contents - from + to;
       }
@@ -452,13 +452,11 @@ Compactor::Compactor(RawHeap& heap) : heap_(heap) {
   }
 }
 
-bool Compactor::ShouldCompact(
-    GarbageCollector::Config::MarkingType marking_type,
-    GarbageCollector::Config::StackState stack_state) const {
+bool Compactor::ShouldCompact(GCConfig::MarkingType marking_type,
+                              StackState stack_state) const {
   if (compactable_spaces_.empty() ||
-      (marking_type == GarbageCollector::Config::MarkingType::kAtomic &&
-       stack_state ==
-           GarbageCollector::Config::StackState::kMayContainHeapPointers)) {
+      (marking_type == GCConfig::MarkingType::kAtomic &&
+       stack_state == StackState::kMayContainHeapPointers)) {
     // The following check ensures that tests that want to test compaction are
     // not interrupted by garbage collections that cannot use compaction.
     DCHECK(!enable_for_next_gc_for_testing_);
@@ -474,9 +472,8 @@ bool Compactor::ShouldCompact(
   return free_list_size > kFreeListSizeThreshold;
 }
 
-void Compactor::InitializeIfShouldCompact(
-    GarbageCollector::Config::MarkingType marking_type,
-    GarbageCollector::Config::StackState stack_state) {
+void Compactor::InitializeIfShouldCompact(GCConfig::MarkingType marking_type,
+                                          StackState stack_state) {
   DCHECK(!is_enabled_);
 
   if (!ShouldCompact(marking_type, stack_state)) return;
@@ -487,14 +484,12 @@ void Compactor::InitializeIfShouldCompact(
   is_cancelled_ = false;
 }
 
-bool Compactor::CancelIfShouldNotCompact(
-    GarbageCollector::Config::MarkingType marking_type,
-    GarbageCollector::Config::StackState stack_state) {
-  if (!is_enabled_ || ShouldCompact(marking_type, stack_state)) return false;
+void Compactor::CancelIfShouldNotCompact(GCConfig::MarkingType marking_type,
+                                         StackState stack_state) {
+  if (!is_enabled_ || ShouldCompact(marking_type, stack_state)) return;
 
   is_cancelled_ = true;
   is_enabled_ = false;
-  return true;
 }
 
 Compactor::CompactableSpaceHandling Compactor::CompactSpacesIfEnabled() {
@@ -510,7 +505,7 @@ Compactor::CompactableSpaceHandling Compactor::CompactSpacesIfEnabled() {
   MovableReferences movable_references(*heap_.heap());
 
   CompactionWorklists::MovableReferencesWorklist::Local local(
-      compaction_worklists_->movable_slots_worklist());
+      *compaction_worklists_->movable_slots_worklist());
   CompactionWorklists::MovableReference* slot;
   while (local.Pop(&slot)) {
     movable_references.AddOrFilter(slot);

@@ -8,7 +8,6 @@
 #include <map>
 
 #include "src/codegen/cpu-features.h"
-#include "src/common/globals.h"
 #include "src/compiler/backend/instruction-scheduler.h"
 #include "src/compiler/backend/instruction.h"
 #include "src/compiler/common-operator.h"
@@ -78,9 +77,8 @@ class FlagsContinuation final {
   }
 
   // Creates a new flags continuation for a wasm trap.
-  static FlagsContinuation ForTrap(FlagsCondition condition, TrapId trap_id,
-                                   Node* result) {
-    return FlagsContinuation(condition, trap_id, result);
+  static FlagsContinuation ForTrap(FlagsCondition condition, TrapId trap_id) {
+    return FlagsContinuation(condition, trap_id);
   }
 
   static FlagsContinuation ForSelect(FlagsCondition condition, Node* result,
@@ -218,13 +216,8 @@ class FlagsContinuation final {
     DCHECK_NOT_NULL(result);
   }
 
-  FlagsContinuation(FlagsCondition condition, TrapId trap_id, Node* result)
-      : mode_(kFlags_trap),
-        condition_(condition),
-        frame_state_or_result_(result),
-        trap_id_(trap_id) {
-    DCHECK_NOT_NULL(result);
-  }
+  FlagsContinuation(FlagsCondition condition, TrapId trap_id)
+      : mode_(kFlags_trap), condition_(condition), trap_id_(trap_id) {}
 
   FlagsContinuation(FlagsCondition condition, Node* result, Node* true_value,
                     Node* false_value)
@@ -292,7 +285,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
       size_t* max_pushed_argument_count,
       SourcePositionMode source_position_mode = kCallSourcePositions,
       Features features = SupportedFeatures(),
-      EnableScheduling enable_scheduling = FLAG_turbo_instruction_scheduling
+      EnableScheduling enable_scheduling = v8_flags.turbo_instruction_scheduling
                                                ? kEnableScheduling
                                                : kDisableScheduling,
       EnableRootsRelativeAddressing enable_roots_relative_addressing =
@@ -300,7 +293,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
       EnableTraceTurboJson trace_turbo = kDisableTraceTurboJson);
 
   // Visit code for the entire graph with the included schedule.
-  bool SelectInstructions();
+  base::Optional<BailoutReason> SelectInstructions();
 
   void StartBlock(RpoNumber rpo);
   void EndBlock(RpoNumber rpo);
@@ -407,15 +400,12 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   // Used in pattern matching during code generation.
   // Check if {node} can be covered while generating code for the current
   // instruction. A node can be covered if the {user} of the node has the only
-  // edge and the two are in the same basic block.
-  // Before fusing two instructions a and b, it is useful to check that
-  // CanCover(a, b) holds. If this is not the case, code for b must still be
-  // generated for other users, and fusing is unlikely to improve performance.
+  // edge, the two are in the same basic block, and there are no side-effects
+  // in-between. The last check is crucial for soundness.
+  // For pure nodes, CanCover(a,b) is checked to avoid duplicated execution:
+  // If this is not the case, code for b must still be generated for other
+  // users, and fusing is unlikely to improve performance.
   bool CanCover(Node* user, Node* node) const;
-  // CanCover is not transitive.  The counter example are Nodes A,B,C such that
-  // CanCover(A, B) and CanCover(B,C) and B is pure: The the effect level of A
-  // and B might differ. CanCoverTransitively does the additional checks.
-  bool CanCoverTransitively(Node* user, Node* node, Node* node_input) const;
 
   // Used in pattern matching during code generation.
   // This function checks that {node} and {user} are in the same basic block,
@@ -749,6 +739,7 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
   BoolVector defined_;
   BoolVector used_;
   IntVector effect_level_;
+  int current_effect_level_;
   IntVector virtual_registers_;
   IntVector virtual_register_rename_;
   InstructionScheduler* scheduler_;

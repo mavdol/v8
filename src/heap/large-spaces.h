@@ -56,7 +56,7 @@ class LargePage : public MemoryChunk {
   friend class MemoryAllocator;
 };
 
-STATIC_ASSERT(sizeof(LargePage) <= MemoryChunk::kHeaderSize);
+static_assert(sizeof(LargePage) <= MemoryChunk::kHeaderSize);
 
 // -----------------------------------------------------------------------------
 // Large objects ( > kMaxRegularHeapObjectSize ) are allocated and managed by
@@ -151,7 +151,11 @@ class V8_EXPORT_PRIVATE LargeObjectSpace : public Space {
   std::atomic<size_t> size_;  // allocated bytes
   int page_count_;       // number of chunks
   std::atomic<size_t> objects_size_;  // size of objects
-  base::Mutex allocation_mutex_;
+  // The mutex has to be recursive because profiler tick might happen while
+  // holding this lock, then the profiler will try to iterate the call stack
+  // which might end up calling CodeLargeObjectSpace::FindPage() and thus
+  // trying to lock the mutex for a second time.
+  base::RecursiveMutex allocation_mutex_;
 
   // Current potentially uninitialized object. Protected by
   // pending_allocation_mutex_.
@@ -159,6 +163,8 @@ class V8_EXPORT_PRIVATE LargeObjectSpace : public Space {
 
   // Used to protect pending_object_.
   base::SharedMutex pending_allocation_mutex_;
+
+  AllocationCounter allocation_counter_;
 
  private:
   friend class LargeObjectSpaceObjectIterator;
@@ -182,6 +188,14 @@ class OldLargeObjectSpace : public LargeObjectSpace {
                                                      Executability executable);
   V8_WARN_UNUSED_RESULT AllocationResult AllocateRawBackground(
       LocalHeap* local_heap, int object_size, Executability executable);
+};
+
+class SharedLargeObjectSpace : public OldLargeObjectSpace {
+ public:
+  explicit SharedLargeObjectSpace(Heap* heap);
+
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT AllocationResult
+  AllocateRawBackground(LocalHeap* local_heap, int object_size);
 };
 
 class NewLargeObjectSpace : public LargeObjectSpace {

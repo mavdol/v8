@@ -143,7 +143,8 @@ void LinuxPerfJitLogger::OpenJitDumpFile() {
   // If --perf-prof-delete-file is given, unlink the file right after opening
   // it. This keeps the file handle to the file valid. This only works on Linux,
   // which is the only platform supported for --perf-prof anyway.
-  if (FLAG_perf_prof_delete_file) CHECK_EQ(0, unlink(perf_dump_name.begin()));
+  if (v8_flags.perf_prof_delete_file)
+    CHECK_EQ(0, unlink(perf_dump_name.begin()));
 
   marker_address_ = OpenMarkerFile(fd);
   if (marker_address_ == nullptr) return;
@@ -216,12 +217,13 @@ void LinuxPerfJitLogger::LogRecordedBuffer(
     Handle<AbstractCode> abstract_code,
     MaybeHandle<SharedFunctionInfo> maybe_shared, const char* name,
     int length) {
-  if (FLAG_perf_basic_prof_only_functions &&
-      (abstract_code->kind() != CodeKind::INTERPRETED_FUNCTION &&
-       abstract_code->kind() != CodeKind::TURBOFAN &&
-       abstract_code->kind() != CodeKind::MAGLEV &&
-       abstract_code->kind() != CodeKind::BASELINE)) {
-    return;
+  if (v8_flags.perf_basic_prof_only_functions) {
+    CodeKind code_kind = abstract_code->kind(isolate_);
+    if (code_kind != CodeKind::INTERPRETED_FUNCTION &&
+        code_kind != CodeKind::TURBOFAN && code_kind != CodeKind::MAGLEV &&
+        code_kind != CodeKind::BASELINE) {
+      return;
+    }
   }
 
   base::LockGuard<base::RecursiveMutex> guard_file(file_mutex_.Pointer());
@@ -229,13 +231,13 @@ void LinuxPerfJitLogger::LogRecordedBuffer(
   if (perf_output_handle_ == nullptr) return;
 
   // We only support non-interpreted functions.
-  if (!abstract_code->IsCode()) return;
+  if (!abstract_code->IsCode(isolate_)) return;
   Handle<Code> code = Handle<Code>::cast(abstract_code);
   DCHECK(code->raw_instruction_start() == code->address() + Code::kHeaderSize);
 
   // Debug info has to be emitted first.
   Handle<SharedFunctionInfo> shared;
-  if (FLAG_perf_prof && maybe_shared.ToHandle(&shared)) {
+  if (v8_flags.perf_prof && maybe_shared.ToHandle(&shared)) {
     // TODO(herhut): This currently breaks for js2wasm/wasm2js functions.
     if (code->kind() != CodeKind::JS_TO_WASM_FUNCTION &&
         code->kind() != CodeKind::WASM_TO_JS_FUNCTION) {
@@ -247,7 +249,7 @@ void LinuxPerfJitLogger::LogRecordedBuffer(
   uint8_t* code_pointer = reinterpret_cast<uint8_t*>(code->InstructionStart());
 
   // Unwinding info comes right after debug info.
-  if (FLAG_perf_prof_unwinding_info) LogWriteUnwindingInfo(*code);
+  if (v8_flags.perf_prof_unwinding_info) LogWriteUnwindingInfo(*code);
 
   WriteJitCodeLoadEntry(code_pointer, code->InstructionSize(), code_name,
                         length);
@@ -260,7 +262,7 @@ void LinuxPerfJitLogger::LogRecordedBuffer(const wasm::WasmCode* code,
 
   if (perf_output_handle_ == nullptr) return;
 
-  if (FLAG_perf_prof_annotate_wasm) LogWriteDebugInfo(code);
+  if (v8_flags.perf_prof_annotate_wasm) LogWriteDebugInfo(code);
 
   WriteJitCodeLoadEntry(code->instructions().begin(),
                         code->instructions().length(), name, length);
@@ -341,7 +343,8 @@ void LinuxPerfJitLogger::LogWriteDebugInfo(Handle<Code> code,
   PerfJitCodeDebugInfo debug_info;
   uint32_t size = sizeof(debug_info);
 
-  ByteArray source_position_table = code->SourcePositionTable(*shared);
+  ByteArray source_position_table =
+      code->SourcePositionTable(isolate_, *shared);
   // Compute the entry count and get the names of all scripts.
   // Avoid additional work if the script name is repeated. Multiple script
   // names only occur for cross-script inlining.
@@ -519,7 +522,7 @@ void LinuxPerfJitLogger::LogWriteUnwindingInfo(Code code) {
 void LinuxPerfJitLogger::CodeMoveEvent(AbstractCode from, AbstractCode to) {
   // We may receive a CodeMove event if a BytecodeArray object moves. Otherwise
   // code relocation is not supported.
-  CHECK(from.IsBytecodeArray());
+  CHECK(from.IsBytecodeArray(isolate_));
 }
 
 void LinuxPerfJitLogger::LogWriteBytes(const char* bytes, int size) {

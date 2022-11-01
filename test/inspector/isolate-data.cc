@@ -8,7 +8,7 @@
 #include "include/v8-exception.h"
 #include "include/v8-microtask-queue.h"
 #include "include/v8-template.h"
-#include "src/base/vector.h"
+#include "src/init/v8.h"
 #include "src/inspector/test-interface.h"
 #include "test/inspector/task-runner.h"
 #include "test/inspector/utils.h"
@@ -389,7 +389,7 @@ bool InspectorIsolateData::isInspectableHeapObject(
     v8::Local<v8::Object> object) {
   v8::Local<v8::Context> context = isolate()->GetCurrentContext();
   v8::MicrotasksScope microtasks_scope(
-      isolate(), v8::MicrotasksScope::kDoNotRunMicrotasks);
+      context, v8::MicrotasksScope::kDoNotRunMicrotasks);
   return !object->HasPrivate(context, not_inspectable_private_.Get(isolate()))
               .FromMaybe(false);
 }

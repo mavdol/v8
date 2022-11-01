@@ -163,16 +163,46 @@ void Stack::IteratePointersUnsafe(StackVisitor* visitor,
   IteratePointersImpl(this, visitor, reinterpret_cast<intptr_t*>(stack_end));
 }
 
-const void* Stack::GetCurrentStackPointerForLocalVariables() {
-#if defined(__has_feature)
-#if __has_feature(safe_stack)
-  return __builtin___get_unsafe_stack_ptr();
-#else   // __has_feature(safe_stack)
-  return v8::base::Stack::GetCurrentStackPosition();
-#endif  // __has_feature(safe_stack)
-#else   // defined(__has_feature)
-  return v8::base::Stack::GetCurrentStackPosition();
-#endif  // defined(__has_feature)
+namespace {
+
+#ifdef DEBUG
+
+bool IsOnCurrentStack(const void* ptr) {
+  DCHECK_NOT_NULL(ptr);
+  const void* current_stack_start = v8::base::Stack::GetStackStart();
+  const void* current_stack_top = v8::base::Stack::GetCurrentStackPosition();
+  return ptr <= current_stack_start && ptr >= current_stack_top;
+}
+
+bool IsValidMarker(const void* stack_start, const void* stack_marker) {
+  const void* current_stack_top = v8::base::Stack::GetCurrentStackPosition();
+  return stack_marker <= stack_start && stack_marker >= current_stack_top;
+}
+
+#endif  // DEBUG
+
+}  // namespace
+
+// In the following three methods, the stored stack start needs not coincide
+// with the current (actual) stack start (e.g., in case it was explicitly set to
+// a lower address, in tests) but has to be inside the current stack.
+
+void Stack::set_marker(const void* stack_marker) {
+  DCHECK(IsOnCurrentStack(stack_start_));
+  DCHECK_NOT_NULL(stack_marker);
+  DCHECK(IsValidMarker(stack_start_, stack_marker));
+  stack_marker_ = stack_marker;
+}
+
+void Stack::clear_marker() {
+  DCHECK(IsOnCurrentStack(stack_start_));
+  stack_marker_ = nullptr;
+}
+
+const void* Stack::get_marker() const {
+  DCHECK(IsOnCurrentStack(stack_start_));
+  DCHECK_NOT_NULL(stack_marker_);
+  return stack_marker_;
 }
 
 }  // namespace base

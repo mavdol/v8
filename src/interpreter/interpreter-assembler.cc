@@ -10,11 +10,9 @@
 #include "src/codegen/code-factory.h"
 #include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/machine-type.h"
-#include "src/execution/frames.h"
 #include "src/interpreter/bytecodes.h"
 #include "src/interpreter/interpreter.h"
 #include "src/objects/objects-inl.h"
-#include "src/zone/zone.h"
 
 namespace v8 {
 namespace internal {
@@ -313,7 +311,7 @@ void InterpreterAssembler::StoreRegisterForShortStar(TNode<Object> value,
   constexpr int short_star_to_operand =
       Register(0).ToOperand() - static_cast<int>(Bytecode::kStar0);
   // Make sure the values count in the right direction.
-  STATIC_ASSERT(short_star_to_operand ==
+  static_assert(short_star_to_operand ==
                 Register(1).ToOperand() - static_cast<int>(Bytecode::kStar1));
 
   TNode<IntPtrT> offset =
@@ -543,12 +541,21 @@ TNode<Uint32T> InterpreterAssembler::BytecodeOperandCount(int operand_index) {
   return BytecodeUnsignedOperand(operand_index, operand_size);
 }
 
-TNode<Uint32T> InterpreterAssembler::BytecodeOperandFlag(int operand_index) {
+TNode<Uint32T> InterpreterAssembler::BytecodeOperandFlag8(int operand_index) {
   DCHECK_EQ(OperandType::kFlag8,
             Bytecodes::GetOperandType(bytecode_, operand_index));
   OperandSize operand_size =
       Bytecodes::GetOperandSize(bytecode_, operand_index, operand_scale());
   DCHECK_EQ(operand_size, OperandSize::kByte);
+  return BytecodeUnsignedOperand(operand_index, operand_size);
+}
+
+TNode<Uint32T> InterpreterAssembler::BytecodeOperandFlag16(int operand_index) {
+  DCHECK_EQ(OperandType::kFlag16,
+            Bytecodes::GetOperandType(bytecode_, operand_index));
+  OperandSize operand_size =
+      Bytecodes::GetOperandSize(bytecode_, operand_index, operand_scale());
+  DCHECK_EQ(operand_size, OperandSize::kShort);
   return BytecodeUnsignedOperand(operand_index, operand_size);
 }
 
@@ -861,8 +868,8 @@ TNode<Object> InterpreterAssembler::ConstructWithSpread(
   IncrementCallCount(feedback_vector, slot_id);
 
   // Check if we have monomorphic {new_target} feedback already.
-  TNode<MaybeObject> feedback =
-      LoadFeedbackVectorSlot(feedback_vector, slot_id);
+  TNode<HeapObjectReference> feedback =
+      CAST(LoadFeedbackVectorSlot(feedback_vector, slot_id));
   Branch(IsWeakReferenceToObject(feedback, new_target), &construct,
          &extra_checks);
 
@@ -1032,8 +1039,8 @@ void InterpreterAssembler::UpdateInterruptBudget(TNode<Int32T> weight,
     BIND(&interrupt_check);
     // JumpLoop should do a stack check as part of the interrupt.
     CallRuntime(bytecode() == Bytecode::kJumpLoop
-                    ? Runtime::kBytecodeBudgetInterruptWithStackCheck
-                    : Runtime::kBytecodeBudgetInterrupt,
+                    ? Runtime::kBytecodeBudgetInterruptWithStackCheck_Ignition
+                    : Runtime::kBytecodeBudgetInterrupt_Ignition,
                 GetContext(), function);
     Goto(&done);
 
@@ -1176,9 +1183,9 @@ void InterpreterAssembler::StarDispatchLookahead(TNode<WordT> target_bytecode) {
   // opcodes are never deliberately written, so we can use a one-sided check.
   // This is no less secure than the normal-length Star handler, which performs
   // no validation on its operand.
-  STATIC_ASSERT(static_cast<int>(Bytecode::kLastShortStar) + 1 ==
+  static_assert(static_cast<int>(Bytecode::kLastShortStar) + 1 ==
                 static_cast<int>(Bytecode::kIllegal));
-  STATIC_ASSERT(Bytecode::kIllegal == Bytecode::kLast);
+  static_assert(Bytecode::kIllegal == Bytecode::kLast);
   TNode<Int32T> first_short_star_bytecode =
       Int32Constant(static_cast<int>(Bytecode::kFirstShortStar));
   TNode<BoolT> is_star = Uint32GreaterThanOrEqual(
@@ -1450,7 +1457,7 @@ void InterpreterAssembler::TraceBytecodeDispatch(TNode<WordT> target_bytecode) {
 
 // static
 bool InterpreterAssembler::TargetSupportsUnalignedAccess() {
-#if V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_RISCV64
+#if V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_RISCV64 || V8_TARGET_ARCH_RISCV32
   return false;
 #elif V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_S390 || \
     V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_PPC ||   \
@@ -1487,7 +1494,7 @@ TNode<FixedArray> InterpreterAssembler::ExportParametersAndRegisterFile(
   TNode<IntPtrT> formal_parameter_count_intptr =
       Signed(ChangeUint32ToWord(formal_parameter_count));
   TNode<UintPtrT> register_count = ChangeUint32ToWord(registers.reg_count());
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     CSA_DCHECK(this, IntPtrEqual(registers.base_reg_location(),
                                  RegisterLocation(Register(0))));
     AbortIfRegisterCountInvalid(array, formal_parameter_count_intptr,
@@ -1559,7 +1566,7 @@ TNode<FixedArray> InterpreterAssembler::ImportRegisterFile(
   TNode<IntPtrT> formal_parameter_count_intptr =
       Signed(ChangeUint32ToWord(formal_parameter_count));
   TNode<UintPtrT> register_count = ChangeUint32ToWord(registers.reg_count());
-  if (FLAG_debug_code) {
+  if (v8_flags.debug_code) {
     CSA_DCHECK(this, IntPtrEqual(registers.base_reg_location(),
                                  RegisterLocation(Register(0))));
     AbortIfRegisterCountInvalid(array, formal_parameter_count_intptr,

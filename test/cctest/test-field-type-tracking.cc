@@ -8,10 +8,7 @@
 
 #include "src/base/logging.h"
 #include "src/execution/execution.h"
-#include "src/handles/global-handles.h"
 #include "src/heap/factory-inl.h"
-#include "src/ic/stub-cache.h"
-#include "src/init/v8.h"
 #include "src/objects/field-type.h"
 #include "src/objects/heap-number-inl.h"
 #include "src/objects/internal-index.h"
@@ -22,7 +19,7 @@
 #include "src/objects/struct-inl.h"
 #include "src/objects/transitions.h"
 #include "src/utils/ostreams.h"
-#include "test/cctest/test-api.h"
+#include "test/cctest/cctest.h"
 
 namespace v8 {
 namespace internal {
@@ -778,7 +775,7 @@ void TestGeneralizeField(const CRFTData& from, const CRFTData& to,
                          ChangeAlertMechanism expected_alert) {
   // Check the cases when the map being reconfigured is a part of the
   // transition tree.
-  STATIC_ASSERT(kPropCount > 4);
+  static_assert(kPropCount > 4);
   int indices[] = {0, 2, kPropCount - 1};
   for (int i = 0; i < static_cast<int>(arraysize(indices)); i++) {
     TestGeneralizeField(-1, indices[i], from, to, expected, expected_alert);
@@ -2279,14 +2276,15 @@ TEST(ElementsKindTransitionFromMapOwningDescriptor) {
   Factory* factory = isolate->factory();
   TestConfig configs[] = {
       {FROZEN, factory->frozen_symbol(),
-       FLAG_enable_sealed_frozen_elements_kind ? HOLEY_FROZEN_ELEMENTS
-                                               : DICTIONARY_ELEMENTS},
+       v8_flags.enable_sealed_frozen_elements_kind ? HOLEY_FROZEN_ELEMENTS
+                                                   : DICTIONARY_ELEMENTS},
       {SEALED, factory->sealed_symbol(),
-       FLAG_enable_sealed_frozen_elements_kind ? HOLEY_SEALED_ELEMENTS
-                                               : DICTIONARY_ELEMENTS},
+       v8_flags.enable_sealed_frozen_elements_kind ? HOLEY_SEALED_ELEMENTS
+                                                   : DICTIONARY_ELEMENTS},
       {NONE, factory->nonextensible_symbol(),
-       FLAG_enable_sealed_frozen_elements_kind ? HOLEY_NONEXTENSIBLE_ELEMENTS
-                                               : DICTIONARY_ELEMENTS}};
+       v8_flags.enable_sealed_frozen_elements_kind
+           ? HOLEY_NONEXTENSIBLE_ELEMENTS
+           : DICTIONARY_ELEMENTS}};
   for (size_t i = 0; i < arraysize(configs); i++) {
     TestGeneralizeFieldWithSpecialTransition(
         &configs[i],
@@ -2347,14 +2345,15 @@ TEST(ElementsKindTransitionFromMapNotOwningDescriptor) {
   Factory* factory = isolate->factory();
   TestConfig configs[] = {
       {FROZEN, factory->frozen_symbol(),
-       FLAG_enable_sealed_frozen_elements_kind ? HOLEY_FROZEN_ELEMENTS
-                                               : DICTIONARY_ELEMENTS},
+       v8_flags.enable_sealed_frozen_elements_kind ? HOLEY_FROZEN_ELEMENTS
+                                                   : DICTIONARY_ELEMENTS},
       {SEALED, factory->sealed_symbol(),
-       FLAG_enable_sealed_frozen_elements_kind ? HOLEY_SEALED_ELEMENTS
-                                               : DICTIONARY_ELEMENTS},
+       v8_flags.enable_sealed_frozen_elements_kind ? HOLEY_SEALED_ELEMENTS
+                                                   : DICTIONARY_ELEMENTS},
       {NONE, factory->nonextensible_symbol(),
-       FLAG_enable_sealed_frozen_elements_kind ? HOLEY_NONEXTENSIBLE_ELEMENTS
-                                               : DICTIONARY_ELEMENTS}};
+       v8_flags.enable_sealed_frozen_elements_kind
+           ? HOLEY_NONEXTENSIBLE_ELEMENTS
+           : DICTIONARY_ELEMENTS}};
   for (size_t i = 0; i < arraysize(configs); i++) {
     TestGeneralizeFieldWithSpecialTransition(
         &configs[i],
@@ -2917,7 +2916,7 @@ void TestStoreToConstantField_NaN(const char* store_func_source,
 }  // namespace
 
 TEST(StoreToConstantField_PlusMinusZero) {
-  FLAG_allow_natives_syntax = true;
+  v8_flags.allow_natives_syntax = true;
   CcTest::InitializeVM();
   v8::HandleScope scope(CcTest::isolate());
 
@@ -3011,7 +3010,7 @@ TEST(NormalizeToMigrationTarget) {
 }
 
 TEST(RepresentationPredicatesAreInSync) {
-  STATIC_ASSERT(Representation::kNumRepresentations == 6);
+  static_assert(Representation::kNumRepresentations == 6);
   static Representation reps[] = {
       Representation::None(),   Representation::Smi(),
       Representation::Double(), Representation::HeapObject(),

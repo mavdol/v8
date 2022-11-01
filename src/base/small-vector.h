@@ -23,7 +23,7 @@ class SmallVector {
   // Currently only support trivially copyable and trivially destructible data
   // types, as it uses memcpy to copy elements and never calls destructors.
   ASSERT_TRIVIALLY_COPYABLE(T);
-  STATIC_ASSERT(std::is_trivially_destructible<T>::value);
+  static_assert(std::is_trivially_destructible<T>::value);
 
  public:
   static constexpr size_t kInlineSize = kSize;
@@ -99,6 +99,12 @@ class SmallVector {
 
   T* end() { return end_; }
   const T* end() const { return end_; }
+
+  auto rbegin() { return std::make_reverse_iterator(end_); }
+  auto rbegin() const { return std::make_reverse_iterator(end_); }
+
+  auto rend() { return std::make_reverse_iterator(begin_); }
+  auto rend() const { return std::make_reverse_iterator(begin_); }
 
   size_t size() const { return end_ - begin_; }
   bool empty() const { return end_ == begin_; }

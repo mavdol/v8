@@ -5,6 +5,7 @@
 #ifndef V8_COMPILER_TURBOSHAFT_OPERATIONS_H_
 #define V8_COMPILER_TURBOSHAFT_OPERATIONS_H_
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -12,27 +13,30 @@
 #include <type_traits>
 #include <utility>
 
-#include "src/base/functional.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
-#include "src/base/small-vector.h"
+#include "src/base/optional.h"
+#include "src/base/platform/mutex.h"
+#include "src/base/template-utils.h"
 #include "src/base/vector.h"
 #include "src/codegen/external-reference.h"
-#include "src/codegen/machine-type.h"
 #include "src/common/globals.h"
+#include "src/compiler/common-operator.h"
 #include "src/compiler/globals.h"
+#include "src/compiler/turboshaft/fast-hash.h"
+#include "src/compiler/turboshaft/representations.h"
+#include "src/compiler/turboshaft/utils.h"
 #include "src/compiler/write-barrier-kind.h"
-#include "src/zone/zone.h"
 
 namespace v8::internal {
 class HeapObject;
-class StringConstantBase;
 }  // namespace v8::internal
 namespace v8::internal::compiler {
 class CallDescriptor;
 class DeoptimizeParameters;
 class FrameStateInfo;
 class Node;
+enum class TrapId : uint32_t;
 }  // namespace v8::internal::compiler
 namespace v8::internal::compiler::turboshaft {
 class Block;
@@ -57,36 +61,49 @@ class Graph;
 //   a variable arity operation where the constructor doesn't take the inputs as
 //   a single base::Vector<OpIndex> argument, it's also necessary to overwrite
 //   the static `New` function, see `CallOp` for an example.
+// - `OperatorProperties` as either a static constexpr member `properties` or a
+//   non-static method `Properties()` if the properties depend on the particular
+//   operation and not just the opcode.
 
 #define TURBOSHAFT_OPERATION_LIST(V) \
-  V(Binop)                           \
+  V(WordBinop)                       \
+  V(FloatBinop)                      \
   V(OverflowCheckedBinop)            \
+  V(WordUnary)                       \
   V(FloatUnary)                      \
   V(Shift)                           \
   V(Equal)                           \
   V(Comparison)                      \
   V(Change)                          \
+  V(TryChange)                       \
+  V(Float64InsertWord32)             \
   V(TaggedBitcast)                   \
+  V(Select)                          \
   V(PendingLoopPhi)                  \
   V(Constant)                        \
   V(Load)                            \
-  V(IndexedLoad)                     \
   V(Store)                           \
-  V(IndexedStore)                    \
+  V(Retain)                          \
   V(Parameter)                       \
+  V(OsrValue)                        \
   V(Goto)                            \
   V(StackPointerGreaterThan)         \
-  V(LoadStackCheckOffset)            \
+  V(StackSlot)                       \
+  V(FrameConstant)                   \
   V(CheckLazyDeopt)                  \
   V(Deoptimize)                      \
   V(DeoptimizeIf)                    \
+  V(TrapIf)                          \
   V(Phi)                             \
   V(FrameState)                      \
   V(Call)                            \
+  V(TailCall)                        \
   V(Unreachable)                     \
   V(Return)                          \
   V(Branch)                          \
+  V(CatchException)                  \
   V(Switch)                          \
+  V(Tuple)                           \
   V(Projection)
 
 enum class Opcode : uint8_t {
@@ -129,11 +146,29 @@ class OpIndex {
     DCHECK_EQ(offset_ % sizeof(OperationStorageSlot), 0);
     return offset_ / sizeof(OperationStorageSlot) / kSlotsPerId;
   }
-  uint32_t offset() const { return offset_; }
+  uint32_t offset() const {
+    DCHECK_EQ(offset_ % sizeof(OperationStorageSlot), 0);
+    return offset_;
+  }
 
   bool valid() const { return *this != Invalid(); }
 
   static constexpr OpIndex Invalid() { return OpIndex(); }
+
+  // Encode a sea-of-nodes node id in the `OpIndex` type.
+  // Only used for node origins that actually point to sea-of-nodes graph nodes.
+  static OpIndex EncodeTurbofanNodeId(uint32_t id) {
+    OpIndex result = OpIndex(id * sizeof(OperationStorageSlot));
+    result.offset_ += kTurbofanNodeIdFlag;
+    return result;
+  }
+  uint32_t DecodeTurbofanNodeId() const {
+    DCHECK(IsTurbofanNodeId());
+    return offset_ / sizeof(OperationStorageSlot);
+  }
+  bool IsTurbofanNodeId() const {
+    return offset_ % sizeof(OperationStorageSlot) == kTurbofanNodeIdFlag;
+  }
 
   bool operator==(OpIndex other) const { return offset_ == other.offset_; }
   bool operator!=(OpIndex other) const { return offset_ != other.offset_; }
@@ -144,9 +179,14 @@ class OpIndex {
 
  private:
   uint32_t offset_;
+
+  static constexpr uint32_t kTurbofanNodeIdFlag = 1;
 };
 
-V8_INLINE size_t hash_value(OpIndex op) { return op.id(); }
+template <>
+struct fast_hash<OpIndex> {
+  V8_INLINE size_t operator()(OpIndex op) { return op.id(); }
+};
 
 // `BlockIndex` is the index of a bound block.
 // A dominating block always has a smaller index.
@@ -172,7 +212,10 @@ class BlockIndex {
   uint32_t id_;
 };
 
-V8_INLINE size_t hash_value(BlockIndex b) { return b.id(); }
+template <>
+struct fast_hash<BlockIndex> {
+  V8_INLINE size_t operator()(BlockIndex op) { return op.id(); }
+};
 
 std::ostream& operator<<(std::ostream& os, BlockIndex b);
 std::ostream& operator<<(std::ostream& os, const Block* b);
@@ -194,6 +237,10 @@ struct OpProperties {
       !(can_read || can_write || can_abort || is_block_terminator);
   const bool is_required_when_unused =
       can_write || can_abort || is_block_terminator;
+  // Nodes that don't read, write and aren't block terminators can be eliminated
+  // via value numbering.
+  const bool can_be_eliminated =
+      !(can_read || can_write || is_block_terminator);
 
   constexpr OpProperties(bool can_read, bool can_write, bool can_abort,
                          bool is_block_terminator)
@@ -209,7 +256,7 @@ struct OpProperties {
   static constexpr OpProperties Writing() {
     return {false, true, false, false};
   }
-  static constexpr OpProperties CanDeopt() {
+  static constexpr OpProperties CanAbort() {
     return {false, false, true, false};
   }
   static constexpr OpProperties AnySideEffects() {
@@ -218,21 +265,44 @@ struct OpProperties {
   static constexpr OpProperties BlockTerminator() {
     return {false, false, false, true};
   }
+  static constexpr OpProperties BlockTerminatorWithAnySideEffect() {
+    return {true, true, true, true};
+  }
+  static constexpr OpProperties ReadingAndCanAbort() {
+    return {true, false, true, false};
+  }
+  static constexpr OpProperties WritingAndCanAbort() {
+    return {false, true, true, false};
+  }
+  bool operator==(const OpProperties& other) const {
+    return can_read == other.can_read && can_write == other.can_write &&
+           can_abort == other.can_abort &&
+           is_block_terminator == other.is_block_terminator;
+  }
 };
+std::ostream& operator<<(std::ostream& os, OpProperties opProperties);
 
-// Baseclass for all TurboShaft operations.
+// Baseclass for all Turboshaft operations.
 // The `alignas(OpIndex)` is necessary because it is followed by an array of
 // `OpIndex` inputs.
 struct alignas(OpIndex) Operation {
   const Opcode opcode;
+
+  // The number of uses of this operation in the current graph.
+  // Instead of overflowing, we saturate the value if it reaches the maximum. In
+  // this case, the true number of uses is unknown.
+  // We use such a small type to save memory and because nodes with a high
+  // number of uses are rare. Additionally, we usually only care if the number
+  // of uses is 0, 1 or bigger than 1.
+  uint8_t saturated_use_count = 0;
+  static constexpr uint8_t kUnknownUseCount =
+      std::numeric_limits<uint8_t>::max();
+
   const uint16_t input_count;
 
   // The inputs are stored adjacent in memory, right behind the `Operation`
   // object.
-  base::Vector<OpIndex> inputs();
   base::Vector<const OpIndex> inputs() const;
-
-  V8_INLINE OpIndex& input(size_t i) { return inputs()[i]; }
   V8_INLINE OpIndex input(size_t i) const { return inputs()[i]; }
 
   static size_t StorageSlotCount(Opcode opcode, size_t input_count);
@@ -264,9 +334,11 @@ struct alignas(OpIndex) Operation {
     if (!Is<Op>()) return nullptr;
     return static_cast<Op*>(this);
   }
-  const OpProperties& properties() const;
+  OpProperties Properties() const;
 
   std::string ToString() const;
+  void PrintInputs(std::ostream& os, const std::string& op_index_prefix) const;
+  void PrintOptions(std::ostream& os) const;
 
  protected:
   // Operation objects store their inputs behind the object. Therefore, they can
@@ -294,6 +366,14 @@ inline void Print(const Operation& op) { std::cout << op << "\n"; }
 
 OperationStorageSlot* AllocateOpStorage(Graph* graph, size_t slot_count);
 
+// Determine if an operation declares `properties`, which means that its
+// properties are static and don't depend on inputs or options.
+template <class Op, class = void>
+struct HasStaticProperties : std::bool_constant<false> {};
+template <class Op>
+struct HasStaticProperties<Op, std::void_t<decltype(Op::properties)>>
+    : std::bool_constant<true> {};
+
 // This template knows the complete type of the operation and is plugged into
 // the inheritance hierarchy. It removes boilerplate from the concrete
 // `Operation` subclasses, defining everything that can be expressed
@@ -306,26 +386,34 @@ struct OperationT : Operation {
 
   static const Opcode opcode;
 
-  static constexpr OpProperties properties() { return Derived::properties; }
+  static constexpr OpProperties Properties() { return Derived::properties; }
+
+  static constexpr base::Optional<OpProperties> PropertiesIfStatic() {
+    if constexpr (HasStaticProperties<Derived>::value) {
+      return Derived::Properties();
+    }
+    return base::nullopt;
+  }
+
+  Derived& derived_this() { return *static_cast<Derived*>(this); }
+  const Derived& derived_this() const {
+    return *static_cast<const Derived*>(this);
+  }
 
   // Shadow Operation::inputs to exploit static knowledge about object size.
   base::Vector<OpIndex> inputs() {
     return {reinterpret_cast<OpIndex*>(reinterpret_cast<char*>(this) +
                                        sizeof(Derived)),
-            input_count};
+            derived_this().input_count};
   }
   base::Vector<const OpIndex> inputs() const {
     return {reinterpret_cast<const OpIndex*>(
                 reinterpret_cast<const char*>(this) + sizeof(Derived)),
-            input_count};
+            derived_this().input_count};
   }
 
-  V8_INLINE OpIndex& input(size_t i) {
-    return static_cast<Derived*>(this)->inputs()[i];
-  }
-  V8_INLINE OpIndex input(size_t i) const {
-    return static_cast<const Derived*>(this)->inputs()[i];
-  }
+  V8_INLINE OpIndex& input(size_t i) { return derived_this().inputs()[i]; }
+  V8_INLINE OpIndex input(size_t i) const { return derived_this().inputs()[i]; }
 
   static size_t StorageSlotCount(size_t input_count) {
     // The operation size in bytes is:
@@ -333,8 +421,8 @@ struct OperationT : Operation {
     // This is an optimized computation of:
     //   round_up(size_in_bytes / sizeof(StorageSlot))
     constexpr size_t r = sizeof(OperationStorageSlot) / sizeof(OpIndex);
-    STATIC_ASSERT(sizeof(OperationStorageSlot) % sizeof(OpIndex) == 0);
-    STATIC_ASSERT(sizeof(Derived) % sizeof(OpIndex) == 0);
+    static_assert(sizeof(OperationStorageSlot) % sizeof(OpIndex) == 0);
+    static_assert(sizeof(Derived) % sizeof(OpIndex) == 0);
     size_t result = std::max<size_t>(
         2, (r - 1 + sizeof(Derived) / sizeof(OpIndex) + input_count) / r);
     DCHECK_EQ(result, Operation::StorageSlotCount(opcode, input_count));
@@ -360,29 +448,39 @@ struct OperationT : Operation {
   }
 
   explicit OperationT(size_t input_count) : Operation(opcode, input_count) {
-    STATIC_ASSERT((std::is_base_of<OperationT, Derived>::value));
+    static_assert((std::is_base_of<OperationT, Derived>::value));
 #if !V8_CC_MSVC
-    STATIC_ASSERT(std::is_trivially_copyable<Derived>::value);
+    static_assert(std::is_trivially_copyable<Derived>::value);
 #endif  // !V8_CC_MSVC
-    STATIC_ASSERT(std::is_trivially_destructible<Derived>::value);
+    static_assert(std::is_trivially_destructible<Derived>::value);
   }
   explicit OperationT(base::Vector<const OpIndex> inputs)
       : OperationT(inputs.size()) {
     this->inputs().OverwriteWith(inputs);
   }
 
-  bool operator==(const Derived& other) const {
-    const Derived& derived = *static_cast<const Derived*>(this);
-    if (derived.inputs() != other.inputs()) return false;
-    return derived.options() == other.options();
+  bool operator==(const Base& other) const {
+    return derived_this().inputs() == other.derived_this().inputs() &&
+           derived_this().options() == other.derived_this().options();
   }
   size_t hash_value() const {
-    const Derived& derived = *static_cast<const Derived*>(this);
-    return base::hash_combine(opcode, derived.inputs(), derived.options());
+    return fast_hash_combine(opcode, derived_this().inputs(),
+                             derived_this().options());
+  }
+
+  void PrintInputs(std::ostream& os, const std::string& op_index_prefix) const {
+    os << "(";
+    bool first = true;
+    for (OpIndex input : inputs()) {
+      if (!first) os << ", ";
+      first = false;
+      os << op_index_prefix << input.id();
+    }
+    os << ")";
   }
 
   void PrintOptions(std::ostream& os) const {
-    const auto& options = static_cast<const Derived*>(this)->options();
+    const auto& options = derived_this().options();
     constexpr size_t options_count =
         std::tuple_size<std::remove_reference_t<decltype(options)>>::value;
     if (options_count == 0) {
@@ -411,19 +509,8 @@ struct FixedArityOperationT : OperationT<Derived> {
   // Enable concise base access in derived struct.
   using Base = FixedArityOperationT;
 
-  // Shadow OperationT<Derived>::inputs to exploit static knowledge about input
-  // count.
+  // Shadow Operation::input_count to exploit static knowledge.
   static constexpr uint16_t input_count = InputCount;
-  base::Vector<OpIndex> inputs() {
-    return {reinterpret_cast<OpIndex*>(reinterpret_cast<char*>(this) +
-                                       sizeof(Derived)),
-            InputCount};
-  }
-  base::Vector<const OpIndex> inputs() const {
-    return {reinterpret_cast<const OpIndex*>(
-                reinterpret_cast<const char*>(this) + sizeof(Derived)),
-            InputCount};
-  }
 
   template <class... Args>
   explicit FixedArityOperationT(Args... args)
@@ -432,12 +519,6 @@ struct FixedArityOperationT : OperationT<Derived> {
     size_t i = 0;
     OpIndex* inputs = this->inputs().begin();
     ((inputs[i++] = args), ...);
-  }
-
-  bool operator==(const Derived& other) const {
-    return std::equal(inputs().begin(), inputs().end(),
-                      other.inputs().begin()) &&
-           static_cast<const Derived*>(this)->options() == other.options();
   }
 
   // Redefine the input initialization to tell C++ about the static input size.
@@ -449,17 +530,80 @@ struct FixedArityOperationT : OperationT<Derived> {
   }
 };
 
-struct BinopOp : FixedArityOperationT<2, BinopOp> {
+#define SUPPORTED_OPERATIONS_LIST(V)               \
+  V(float32_round_down, Float32RoundDown)          \
+  V(float64_round_down, Float64RoundDown)          \
+  V(float32_round_up, Float32RoundUp)              \
+  V(float64_round_up, Float64RoundUp)              \
+  V(float32_round_to_zero, Float32RoundTruncate)   \
+  V(float64_round_to_zero, Float64RoundTruncate)   \
+  V(float32_round_ties_even, Float32RoundTiesEven) \
+  V(float64_round_ties_even, Float64RoundTiesEven) \
+  V(float64_round_ties_away, Float64RoundTiesAway) \
+  V(int32_div_is_safe, Int32DivIsSafe)             \
+  V(uint32_div_is_safe, Uint32DivIsSafe)           \
+  V(word32_shift_is_safe, Word32ShiftIsSafe)       \
+  V(word32_ctz, Word32Ctz)                         \
+  V(word64_ctz, Word64Ctz)                         \
+  V(word64_ctz_lowerable, Word64CtzLowerable)      \
+  V(word32_popcnt, Word32Popcnt)                   \
+  V(word64_popcnt, Word64Popcnt)                   \
+  V(word32_reverse_bits, Word32ReverseBits)        \
+  V(word64_reverse_bits, Word64ReverseBits)        \
+  V(float32_select, Float32Select)                 \
+  V(float64_select, Float64Select)                 \
+  V(int32_abs_with_overflow, Int32AbsWithOverflow) \
+  V(int64_abs_with_overflow, Int64AbsWithOverflow) \
+  V(word32_rol, Word32Rol)                         \
+  V(word64_rol, Word64Rol)                         \
+  V(word64_rol_lowerable, Word64RolLowerable)      \
+  V(sat_conversion_is_safe, SatConversionIsSafe)   \
+  V(word32_select, Word32Select)                   \
+  V(word64_select, Word64Select)
+
+class SupportedOperations {
+#define DECLARE_FIELD(name, machine_name) bool name##_;
+#define DECLARE_GETTER(name, machine_name)     \
+  static bool name() {                         \
+    if constexpr (DEBUG_BOOL) {                \
+      base::MutexGuard lock(mutex_.Pointer()); \
+      DCHECK(initialized_);                    \
+    }                                          \
+    return instance_.name##_;                  \
+  }
+
+ public:
+  static void Initialize();
+  SUPPORTED_OPERATIONS_LIST(DECLARE_GETTER)
+
+ private:
+  SUPPORTED_OPERATIONS_LIST(DECLARE_FIELD)
+
+  static bool initialized_;
+  static base::LazyMutex mutex_;
+  static SupportedOperations instance_;
+
+#undef DECLARE_FIELD
+#undef DECLARE_GETTER
+};
+
+struct WordBinopOp : FixedArityOperationT<2, WordBinopOp> {
   enum class Kind : uint8_t {
     kAdd,
     kMul,
+    kSignedMulOverflownBits,
+    kUnsignedMulOverflownBits,
     kBitwiseAnd,
     kBitwiseOr,
     kBitwiseXor,
     kSub,
+    kSignedDiv,
+    kUnsignedDiv,
+    kSignedMod,
+    kUnsignedMod,
   };
   Kind kind;
-  MachineRepresentation rep;
+  WordRepresentation rep;
 
   static constexpr OpProperties properties = OpProperties::Pure();
 
@@ -470,19 +614,22 @@ struct BinopOp : FixedArityOperationT<2, BinopOp> {
     switch (kind) {
       case Kind::kAdd:
       case Kind::kMul:
+      case Kind::kSignedMulOverflownBits:
+      case Kind::kUnsignedMulOverflownBits:
       case Kind::kBitwiseAnd:
       case Kind::kBitwiseOr:
       case Kind::kBitwiseXor:
         return true;
       case Kind::kSub:
+      case Kind::kSignedDiv:
+      case Kind::kUnsignedDiv:
+      case Kind::kSignedMod:
+      case Kind::kUnsignedMod:
         return false;
     }
   }
 
-  static bool IsAssociative(Kind kind, MachineRepresentation rep) {
-    if (IsFloatingPoint(rep)) {
-      return false;
-    }
+  static bool IsAssociative(Kind kind) {
     switch (kind) {
       case Kind::kAdd:
       case Kind::kMul:
@@ -490,7 +637,13 @@ struct BinopOp : FixedArityOperationT<2, BinopOp> {
       case Kind::kBitwiseOr:
       case Kind::kBitwiseXor:
         return true;
+      case Kind::kSignedMulOverflownBits:
+      case Kind::kUnsignedMulOverflownBits:
       case Kind::kSub:
+      case Kind::kSignedDiv:
+      case Kind::kUnsignedDiv:
+      case Kind::kSignedMod:
+      case Kind::kUnsignedMod:
         return false;
     }
   }
@@ -505,11 +658,63 @@ struct BinopOp : FixedArityOperationT<2, BinopOp> {
       case Kind::kBitwiseXor:
       case Kind::kSub:
         return true;
+      case Kind::kSignedMulOverflownBits:
+      case Kind::kUnsignedMulOverflownBits:
+      case Kind::kSignedDiv:
+      case Kind::kUnsignedDiv:
+      case Kind::kSignedMod:
+      case Kind::kUnsignedMod:
+        return false;
     }
   }
 
-  BinopOp(OpIndex left, OpIndex right, Kind kind, MachineRepresentation rep)
+  WordBinopOp(OpIndex left, OpIndex right, Kind kind, WordRepresentation rep)
       : Base(left, right), kind(kind), rep(rep) {}
+  auto options() const { return std::tuple{kind, rep}; }
+  void PrintOptions(std::ostream& os) const;
+};
+
+struct FloatBinopOp : FixedArityOperationT<2, FloatBinopOp> {
+  enum class Kind : uint8_t {
+    kAdd,
+    kMul,
+    kMin,
+    kMax,
+    kSub,
+    kDiv,
+    kMod,
+    kPower,
+    kAtan2,
+  };
+  Kind kind;
+  FloatRepresentation rep;
+
+  static constexpr OpProperties properties = OpProperties::Pure();
+
+  OpIndex left() const { return input(0); }
+  OpIndex right() const { return input(1); }
+
+  static bool IsCommutative(Kind kind) {
+    switch (kind) {
+      case Kind::kAdd:
+      case Kind::kMul:
+      case Kind::kMin:
+      case Kind::kMax:
+        return true;
+      case Kind::kSub:
+      case Kind::kDiv:
+      case Kind::kMod:
+      case Kind::kPower:
+      case Kind::kAtan2:
+        return false;
+    }
+  }
+
+  FloatBinopOp(OpIndex left, OpIndex right, Kind kind, FloatRepresentation rep)
+      : Base(left, right), kind(kind), rep(rep) {
+    DCHECK_IMPLIES(kind == any_of(Kind::kPower, Kind::kAtan2, Kind::kMod),
+                   rep == FloatRepresentation::Float64());
+  }
   auto options() const { return std::tuple{kind, rep}; }
   void PrintOptions(std::ostream& os) const;
 };
@@ -522,7 +727,7 @@ struct OverflowCheckedBinopOp
     kSignedSub,
   };
   Kind kind;
-  MachineRepresentation rep;
+  WordRepresentation rep;
 
   static constexpr OpProperties properties = OpProperties::Pure();
 
@@ -540,22 +745,79 @@ struct OverflowCheckedBinopOp
   }
 
   OverflowCheckedBinopOp(OpIndex left, OpIndex right, Kind kind,
-                         MachineRepresentation rep)
+                         WordRepresentation rep)
       : Base(left, right), kind(kind), rep(rep) {}
   auto options() const { return std::tuple{kind, rep}; }
   void PrintOptions(std::ostream& os) const;
 };
 
-struct FloatUnaryOp : FixedArityOperationT<1, FloatUnaryOp> {
-  enum class Kind : uint8_t { kAbs, kNegate, kSilenceNaN };
+struct WordUnaryOp : FixedArityOperationT<1, WordUnaryOp> {
+  enum class Kind : uint8_t {
+    kReverseBytes,
+    kCountLeadingZeros,
+    kCountTrailingZeros,
+    kPopCount,
+    kSignExtend8,
+    kSignExtend16,
+  };
   Kind kind;
-  MachineRepresentation rep;
+  WordRepresentation rep;
   static constexpr OpProperties properties = OpProperties::Pure();
 
   OpIndex input() const { return Base::input(0); }
 
-  explicit FloatUnaryOp(OpIndex input, Kind kind, MachineRepresentation rep)
-      : Base(input), kind(kind), rep(rep) {}
+  static bool IsSupported(Kind kind, WordRepresentation rep);
+
+  explicit WordUnaryOp(OpIndex input, Kind kind, WordRepresentation rep)
+      : Base(input), kind(kind), rep(rep) {
+    DCHECK(IsSupported(kind, rep));
+  }
+  auto options() const { return std::tuple{kind, rep}; }
+};
+std::ostream& operator<<(std::ostream& os, WordUnaryOp::Kind kind);
+
+struct FloatUnaryOp : FixedArityOperationT<1, FloatUnaryOp> {
+  enum class Kind : uint8_t {
+    kAbs,
+    kNegate,
+    kSilenceNaN,
+    kRoundDown,      // round towards -infinity
+    kRoundUp,        // round towards +infinity
+    kRoundToZero,    // round towards 0
+    kRoundTiesEven,  // break ties by rounding towards the next even number
+    kLog,
+    kLog2,
+    kLog10,
+    kLog1p,
+    kSqrt,
+    kCbrt,
+    kExp,
+    kExpm1,
+    kSin,
+    kCos,
+    kSinh,
+    kCosh,
+    kAcos,
+    kAsin,
+    kAsinh,
+    kAcosh,
+    kTan,
+    kTanh,
+    kAtan,
+    kAtanh,
+  };
+  Kind kind;
+  FloatRepresentation rep;
+  static constexpr OpProperties properties = OpProperties::Pure();
+
+  OpIndex input() const { return Base::input(0); }
+
+  static bool IsSupported(Kind kind, FloatRepresentation rep);
+
+  explicit FloatUnaryOp(OpIndex input, Kind kind, FloatRepresentation rep)
+      : Base(input), kind(kind), rep(rep) {
+    DCHECK(IsSupported(kind, rep));
+  }
   auto options() const { return std::tuple{kind, rep}; }
 };
 std::ostream& operator<<(std::ostream& os, FloatUnaryOp::Kind kind);
@@ -565,10 +827,12 @@ struct ShiftOp : FixedArityOperationT<2, ShiftOp> {
     kShiftRightArithmeticShiftOutZeros,
     kShiftRightArithmetic,
     kShiftRightLogical,
-    kShiftLeft
+    kShiftLeft,
+    kRotateRight,
+    kRotateLeft
   };
   Kind kind;
-  MachineRepresentation rep;
+  WordRepresentation rep;
 
   static constexpr OpProperties properties = OpProperties::Pure();
 
@@ -582,31 +846,46 @@ struct ShiftOp : FixedArityOperationT<2, ShiftOp> {
       case Kind::kShiftRightLogical:
         return true;
       case Kind::kShiftLeft:
+      case Kind::kRotateRight:
+      case Kind::kRotateLeft:
         return false;
     }
   }
-  static bool IsLeftShift(Kind kind) { return !IsRightShift(kind); }
+  // The Word32 and Word64 versions of the operator compute the same result when
+  // truncated to 32 bit.
+  static bool AllowsWord64ToWord32Truncation(Kind kind) {
+    switch (kind) {
+      case Kind::kShiftLeft:
+        return true;
+      case Kind::kShiftRightArithmeticShiftOutZeros:
+      case Kind::kShiftRightArithmetic:
+      case Kind::kShiftRightLogical:
+      case Kind::kRotateRight:
+      case Kind::kRotateLeft:
+        return false;
+    }
+  }
 
-  ShiftOp(OpIndex left, OpIndex right, Kind kind, MachineRepresentation rep)
+  ShiftOp(OpIndex left, OpIndex right, Kind kind, WordRepresentation rep)
       : Base(left, right), kind(kind), rep(rep) {}
   auto options() const { return std::tuple{kind, rep}; }
 };
 std::ostream& operator<<(std::ostream& os, ShiftOp::Kind kind);
 
 struct EqualOp : FixedArityOperationT<2, EqualOp> {
-  MachineRepresentation rep;
+  RegisterRepresentation rep;
 
   static constexpr OpProperties properties = OpProperties::Pure();
 
   OpIndex left() const { return input(0); }
   OpIndex right() const { return input(1); }
 
-  EqualOp(OpIndex left, OpIndex right, MachineRepresentation rep)
+  EqualOp(OpIndex left, OpIndex right, RegisterRepresentation rep)
       : Base(left, right), rep(rep) {
-    DCHECK(rep == MachineRepresentation::kWord32 ||
-           rep == MachineRepresentation::kWord64 ||
-           rep == MachineRepresentation::kFloat32 ||
-           rep == MachineRepresentation::kFloat64);
+    DCHECK(rep == any_of(RegisterRepresentation::Word32(),
+                         RegisterRepresentation::Word64(),
+                         RegisterRepresentation::Float32(),
+                         RegisterRepresentation::Float64()));
   }
   auto options() const { return std::tuple{rep}; }
 };
@@ -619,7 +898,7 @@ struct ComparisonOp : FixedArityOperationT<2, ComparisonOp> {
     kUnsignedLessThanOrEqual
   };
   Kind kind;
-  MachineRepresentation rep;
+  RegisterRepresentation rep;
 
   static constexpr OpProperties properties = OpProperties::Pure();
 
@@ -627,26 +906,53 @@ struct ComparisonOp : FixedArityOperationT<2, ComparisonOp> {
   OpIndex right() const { return input(1); }
 
   ComparisonOp(OpIndex left, OpIndex right, Kind kind,
-               MachineRepresentation rep)
-      : Base(left, right), kind(kind), rep(rep) {}
+               RegisterRepresentation rep)
+      : Base(left, right), kind(kind), rep(rep) {
+    DCHECK_EQ(rep, any_of(RegisterRepresentation::Word32(),
+                          RegisterRepresentation::Word64(),
+                          RegisterRepresentation::Float32(),
+                          RegisterRepresentation::Float64()));
+    DCHECK_IMPLIES(
+        rep == any_of(RegisterRepresentation::Float32(),
+                      RegisterRepresentation::Float64()),
+        kind == any_of(Kind::kSignedLessThan, Kind::kSignedLessThanOrEqual));
+  }
   auto options() const { return std::tuple{kind, rep}; }
+
+  static bool IsSigned(Kind kind) {
+    switch (kind) {
+      case Kind::kSignedLessThan:
+      case Kind::kSignedLessThanOrEqual:
+        return true;
+      case Kind::kUnsignedLessThan:
+      case Kind::kUnsignedLessThanOrEqual:
+        return false;
+    }
+  }
+  static Kind SetSigned(Kind kind, bool is_signed) {
+    switch (kind) {
+      case Kind::kSignedLessThan:
+      case Kind::kUnsignedLessThan:
+        return is_signed ? Kind::kSignedLessThan : Kind::kUnsignedLessThan;
+      case Kind::kSignedLessThanOrEqual:
+      case Kind::kUnsignedLessThanOrEqual:
+        return is_signed ? Kind::kSignedLessThanOrEqual
+                         : Kind::kUnsignedLessThanOrEqual;
+    }
+  }
 };
 std::ostream& operator<<(std::ostream& os, ComparisonOp::Kind kind);
 
 struct ChangeOp : FixedArityOperationT<1, ChangeOp> {
   enum class Kind : uint8_t {
-    // narrowing means undefined behavior if value cannot be represented
-    // precisely
-    kSignedNarrowing,
-    kUnsignedNarrowing,
-    // reduce integer bit-width, resulting in a modulo operation
-    kIntegerTruncate,
-    // system-specific conversion to (un)signed number
-    kSignedFloatTruncate,
-    kUnsignedFloatTruncate,
-    // like kSignedFloatTruncate, but overflow guaranteed to result in the
-    // minimal integer
+    // convert between different floating-point types
+    kFloatConversion,
+    // overflow guaranteed to result in the minimal integer
     kSignedFloatTruncateOverflowToMin,
+    kUnsignedFloatTruncateOverflowToMin,
+    // JS semantics float64 to word32 truncation
+    // https://tc39.es/ecma262/#sec-touint32
+    kJSFloatTruncate,
     // convert (un)signed integer to floating-point value
     kSignedToFloat,
     kUnsignedToFloat,
@@ -660,42 +966,184 @@ struct ChangeOp : FixedArityOperationT<1, ChangeOp> {
     // preserve bits, change meaning
     kBitcast
   };
+  // Violated assumptions result in undefined behavior.
+  enum class Assumption : uint8_t {
+    kNoAssumption,
+    // Used for conversions from floating-point to integer, assumes that the
+    // value doesn't exceed the integer range.
+    kNoOverflow,
+    // Assume that the original value can be recovered by a corresponding
+    // reverse transformation.
+    kReversible,
+  };
   Kind kind;
-  MachineRepresentation from;
-  MachineRepresentation to;
+  // Reversible means undefined behavior if value cannot be represented
+  // precisely.
+  Assumption assumption;
+  RegisterRepresentation from;
+  RegisterRepresentation to;
+
+  static bool IsReversible(Kind kind, Assumption assumption,
+                           RegisterRepresentation from,
+                           RegisterRepresentation to, Kind reverse_kind,
+                           bool signalling_nan_possible) {
+    switch (kind) {
+      case Kind::kFloatConversion:
+        return from == RegisterRepresentation::Float32() &&
+               to == RegisterRepresentation::Float64() &&
+               reverse_kind == Kind::kFloatConversion &&
+               !signalling_nan_possible;
+      case Kind::kSignedFloatTruncateOverflowToMin:
+        return assumption == Assumption::kReversible &&
+               reverse_kind == Kind::kSignedToFloat;
+      case Kind::kUnsignedFloatTruncateOverflowToMin:
+        return assumption == Assumption::kReversible &&
+               reverse_kind == Kind::kUnsignedToFloat;
+      case Kind::kJSFloatTruncate:
+        return false;
+      case Kind::kSignedToFloat:
+        if (from == RegisterRepresentation::Word32() &&
+            to == RegisterRepresentation::Float64()) {
+          return reverse_kind == any_of(Kind::kSignedFloatTruncateOverflowToMin,
+                                        Kind::kJSFloatTruncate);
+        } else {
+          return assumption == Assumption::kReversible &&
+                 reverse_kind ==
+                     any_of(Kind::kSignedFloatTruncateOverflowToMin);
+        }
+      case Kind::kUnsignedToFloat:
+        if (from == RegisterRepresentation::Word32() &&
+            to == RegisterRepresentation::Float64()) {
+          return reverse_kind ==
+                 any_of(Kind::kUnsignedFloatTruncateOverflowToMin,
+                        Kind::kJSFloatTruncate);
+        } else {
+          return assumption == Assumption::kReversible &&
+                 reverse_kind == Kind::kUnsignedFloatTruncateOverflowToMin;
+        }
+      case Kind::kExtractHighHalf:
+      case Kind::kExtractLowHalf:
+      case Kind::kZeroExtend:
+      case Kind::kSignExtend:
+        return false;
+      case Kind::kBitcast:
+        return reverse_kind == Kind::kBitcast;
+    }
+  }
+
+  bool IsReversibleBy(Kind reverse_kind, bool signalling_nan_possible) const {
+    return IsReversible(kind, assumption, from, to, reverse_kind,
+                        signalling_nan_possible);
+  }
 
   static constexpr OpProperties properties = OpProperties::Pure();
 
   OpIndex input() const { return Base::input(0); }
 
-  ChangeOp(OpIndex input, Kind kind, MachineRepresentation from,
-           MachineRepresentation to)
+  ChangeOp(OpIndex input, Kind kind, Assumption assumption,
+           RegisterRepresentation from, RegisterRepresentation to)
+      : Base(input), kind(kind), assumption(assumption), from(from), to(to) {}
+  auto options() const { return std::tuple{kind, assumption, from, to}; }
+};
+std::ostream& operator<<(std::ostream& os, ChangeOp::Kind kind);
+std::ostream& operator<<(std::ostream& os, ChangeOp::Assumption assumption);
+
+// Perform a conversion and return a pair of the result and a bit if it was
+// successful.
+struct TryChangeOp : FixedArityOperationT<1, TryChangeOp> {
+  enum class Kind : uint8_t {
+    // The result of the truncation is undefined if the result is out of range.
+    kSignedFloatTruncateOverflowUndefined,
+    kUnsignedFloatTruncateOverflowUndefined,
+  };
+  Kind kind;
+  FloatRepresentation from;
+  WordRepresentation to;
+
+  static constexpr OpProperties properties = OpProperties::Pure();
+
+  OpIndex input() const { return Base::input(0); }
+
+  TryChangeOp(OpIndex input, Kind kind, FloatRepresentation from,
+              WordRepresentation to)
       : Base(input), kind(kind), from(from), to(to) {}
   auto options() const { return std::tuple{kind, from, to}; }
 };
-std::ostream& operator<<(std::ostream& os, ChangeOp::Kind kind);
+std::ostream& operator<<(std::ostream& os, TryChangeOp::Kind kind);
+
+// TODO(tebbi): Unify with other operations.
+struct Float64InsertWord32Op : FixedArityOperationT<2, Float64InsertWord32Op> {
+  enum class Kind { kLowHalf, kHighHalf };
+  Kind kind;
+
+  static constexpr OpProperties properties = OpProperties::Pure();
+
+  OpIndex float64() const { return input(0); }
+  OpIndex word32() const { return input(1); }
+
+  Float64InsertWord32Op(OpIndex float64, OpIndex word32, Kind kind)
+      : Base(float64, word32), kind(kind) {}
+  auto options() const { return std::tuple{kind}; }
+};
+std::ostream& operator<<(std::ostream& os, Float64InsertWord32Op::Kind kind);
 
 struct TaggedBitcastOp : FixedArityOperationT<1, TaggedBitcastOp> {
-  MachineRepresentation from;
-  MachineRepresentation to;
+  RegisterRepresentation from;
+  RegisterRepresentation to;
 
   // Due to moving GC, converting from or to pointers doesn't commute with GC.
   static constexpr OpProperties properties = OpProperties::Reading();
 
   OpIndex input() const { return Base::input(0); }
 
-  TaggedBitcastOp(OpIndex input, MachineRepresentation from,
-                  MachineRepresentation to)
-      : Base(input), from(from), to(to) {}
+  TaggedBitcastOp(OpIndex input, RegisterRepresentation from,
+                  RegisterRepresentation to)
+      : Base(input), from(from), to(to) {
+    DCHECK((from == RegisterRepresentation::PointerSized() &&
+            to == RegisterRepresentation::Tagged()) ||
+           (from == RegisterRepresentation::Tagged() &&
+            to == RegisterRepresentation::PointerSized()));
+  }
   auto options() const { return std::tuple{from, to}; }
 };
 
+struct SelectOp : FixedArityOperationT<3, SelectOp> {
+  enum class Implementation : uint8_t { kBranch, kCMove };
+
+  static constexpr OpProperties properties = OpProperties::Pure();
+  RegisterRepresentation rep;
+  BranchHint hint;
+  Implementation implem;
+
+  SelectOp(OpIndex cond, OpIndex vtrue, OpIndex vfalse,
+           RegisterRepresentation rep, BranchHint hint, Implementation implem)
+      : Base(cond, vtrue, vfalse), rep(rep), hint(hint), implem(implem) {
+#ifdef DEBUG
+    if (implem == Implementation::kCMove) {
+      DCHECK((rep == RegisterRepresentation::Word32() &&
+              SupportedOperations::word32_select()) ||
+             (rep == RegisterRepresentation::Word64() &&
+              SupportedOperations::word64_select()));
+    }
+#endif
+  }
+
+  OpIndex cond() const { return input(0); }
+  OpIndex vtrue() const { return input(1); }
+  OpIndex vfalse() const { return input(2); }
+
+  auto options() const { return std::tuple{rep, hint, implem}; }
+};
+std::ostream& operator<<(std::ostream& os, SelectOp::Implementation kind);
+
 struct PhiOp : OperationT<PhiOp> {
-  MachineRepresentation rep;
+  RegisterRepresentation rep;
 
   static constexpr OpProperties properties = OpProperties::Pure();
 
-  explicit PhiOp(base::Vector<const OpIndex> inputs, MachineRepresentation rep)
+  static constexpr size_t kLoopPhiBackEdgeIndex = 1;
+
+  explicit PhiOp(base::Vector<const OpIndex> inputs, RegisterRepresentation rep)
       : Base(inputs), rep(rep) {}
   auto options() const { return std::tuple{rep}; }
 };
@@ -703,9 +1151,9 @@ struct PhiOp : OperationT<PhiOp> {
 // Only used when moving a loop phi to a new graph while the loop backedge has
 // not been emitted yet.
 struct PendingLoopPhiOp : FixedArityOperationT<1, PendingLoopPhiOp> {
-  MachineRepresentation rep;
+  RegisterRepresentation rep;
   union {
-    // Used when transforming a TurboShaft graph.
+    // Used when transforming a Turboshaft graph.
     // This is not an input because it refers to the old graph.
     OpIndex old_backedge_index = OpIndex::Invalid();
     // Used when translating from sea-of-nodes.
@@ -716,12 +1164,12 @@ struct PendingLoopPhiOp : FixedArityOperationT<1, PendingLoopPhiOp> {
 
   OpIndex first() const { return input(0); }
 
-  PendingLoopPhiOp(OpIndex first, MachineRepresentation rep,
+  PendingLoopPhiOp(OpIndex first, RegisterRepresentation rep,
                    OpIndex old_backedge_index)
       : Base(first), rep(rep), old_backedge_index(old_backedge_index) {
     DCHECK(old_backedge_index.valid());
   }
-  PendingLoopPhiOp(OpIndex first, MachineRepresentation rep,
+  PendingLoopPhiOp(OpIndex first, RegisterRepresentation rep,
                    Node* old_backedge_node)
       : Base(first), rep(rep), old_backedge_node(old_backedge_node) {}
   std::tuple<> options() const { UNREACHABLE(); }
@@ -739,7 +1187,8 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     kExternal,
     kHeapObject,
     kCompressedHeapObject,
-    kDelayedString
+    kRelocatableWasmCall,
+    kRelocatableWasmStubCall
   };
 
   Kind kind;
@@ -749,45 +1198,50 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     double float64;
     ExternalReference external;
     Handle<HeapObject> handle;
-    const StringConstantBase* string;
 
     Storage(uint64_t integral = 0) : integral(integral) {}
     Storage(double constant) : float64(constant) {}
     Storage(float constant) : float32(constant) {}
     Storage(ExternalReference constant) : external(constant) {}
     Storage(Handle<HeapObject> constant) : handle(constant) {}
-    Storage(const StringConstantBase* constant) : string(constant) {}
   } storage;
 
   static constexpr OpProperties properties = OpProperties::Pure();
 
-  MachineRepresentation Representation() const {
+  RegisterRepresentation Representation() const {
     switch (kind) {
       case Kind::kWord32:
-        return MachineRepresentation::kWord32;
+        return RegisterRepresentation::Word32();
       case Kind::kWord64:
-        return MachineRepresentation::kWord64;
+        return RegisterRepresentation::Word64();
       case Kind::kFloat32:
-        return MachineRepresentation::kFloat32;
+        return RegisterRepresentation::Float32();
       case Kind::kFloat64:
-        return MachineRepresentation::kFloat64;
+        return RegisterRepresentation::Float64();
       case Kind::kExternal:
       case Kind::kTaggedIndex:
-        return MachineType::PointerRepresentation();
+      case Kind::kRelocatableWasmCall:
+      case Kind::kRelocatableWasmStubCall:
+        return RegisterRepresentation::PointerSized();
       case Kind::kHeapObject:
       case Kind::kNumber:
-      case Kind::kDelayedString:
-        return MachineRepresentation::kTagged;
+        return RegisterRepresentation::Tagged();
       case Kind::kCompressedHeapObject:
-        return MachineRepresentation::kCompressed;
+        return RegisterRepresentation::Compressed();
     }
   }
 
   ConstantOp(Kind kind, Storage storage)
-      : Base(), kind(kind), storage(storage) {}
+      : Base(), kind(kind), storage(storage) {
+    DCHECK_IMPLIES(
+        kind == Kind::kWord32,
+        storage.integral <= WordRepresentation::Word32().MaxUnsignedValue());
+  }
 
   uint64_t integral() const {
-    DCHECK(kind == Kind::kWord32 || kind == Kind::kWord64);
+    DCHECK(kind == Kind::kWord32 || kind == Kind::kWord64 ||
+           kind == Kind::kRelocatableWasmCall ||
+           kind == Kind::kRelocatableWasmStubCall);
     return storage.integral;
   }
 
@@ -842,11 +1296,6 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     return storage.handle;
   }
 
-  const StringConstantBase* delayed_string() const {
-    DCHECK(kind == Kind::kDelayedString);
-    return storage.string;
-  }
-
   bool IsZero() const {
     switch (kind) {
       case Kind::kWord32:
@@ -861,7 +1310,8 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
       case Kind::kExternal:
       case Kind::kHeapObject:
       case Kind::kCompressedHeapObject:
-      case Kind::kDelayedString:
+      case Kind::kRelocatableWasmCall:
+      case Kind::kRelocatableWasmStubCall:
         UNREACHABLE();
     }
   }
@@ -880,12 +1330,13 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
       case Kind::kExternal:
       case Kind::kHeapObject:
       case Kind::kCompressedHeapObject:
-      case Kind::kDelayedString:
+      case Kind::kRelocatableWasmCall:
+      case Kind::kRelocatableWasmStubCall:
         UNREACHABLE();
     }
   }
 
-  bool IsIntegral(uint64_t value) const {
+  bool IsWord(uint64_t value) const {
     switch (kind) {
       case Kind::kWord32:
         return static_cast<uint32_t>(value) == word32();
@@ -896,25 +1347,27 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
     }
   }
 
+  auto options() const { return std::tuple{kind, storage}; }
+
   void PrintOptions(std::ostream& os) const;
   size_t hash_value() const {
     switch (kind) {
       case Kind::kWord32:
       case Kind::kWord64:
       case Kind::kTaggedIndex:
-        return base::hash_combine(kind, storage.integral);
+      case Kind::kRelocatableWasmCall:
+      case Kind::kRelocatableWasmStubCall:
+        return fast_hash_combine(opcode, kind, storage.integral);
       case Kind::kFloat32:
-        return base::hash_combine(kind, storage.float32);
+        return fast_hash_combine(opcode, kind, storage.float32);
       case Kind::kFloat64:
       case Kind::kNumber:
-        return base::hash_combine(kind, storage.float64);
+        return fast_hash_combine(opcode, kind, storage.float64);
       case Kind::kExternal:
-        return base::hash_combine(kind, storage.external.address());
+        return fast_hash_combine(opcode, kind, storage.external.address());
       case Kind::kHeapObject:
       case Kind::kCompressedHeapObject:
-        return base::hash_combine(kind, storage.handle.address());
-      case Kind::kDelayedString:
-        return base::hash_combine(kind, storage.string);
+        return fast_hash_combine(opcode, kind, storage.handle.address());
     }
   }
   bool operator==(const ConstantOp& other) const {
@@ -923,133 +1376,174 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
       case Kind::kWord32:
       case Kind::kWord64:
       case Kind::kTaggedIndex:
+      case Kind::kRelocatableWasmCall:
+      case Kind::kRelocatableWasmStubCall:
         return storage.integral == other.storage.integral;
       case Kind::kFloat32:
-        return storage.float32 == other.storage.float32;
+        // Using a bit_cast to uint32_t in order to return false when comparing
+        // +0 and -0.
+        return base::bit_cast<uint32_t>(storage.float32) ==
+                   base::bit_cast<uint32_t>(other.storage.float32) ||
+               (std::isnan(storage.float32) &&
+                std::isnan(other.storage.float32));
       case Kind::kFloat64:
       case Kind::kNumber:
-        return storage.float64 == other.storage.float64;
+        // Using a bit_cast to uint64_t in order to return false when comparing
+        // +0 and -0.
+        return base::bit_cast<uint64_t>(storage.float64) ==
+                   base::bit_cast<uint64_t>(other.storage.float64) ||
+               (std::isnan(storage.float64) &&
+                std::isnan(other.storage.float64));
       case Kind::kExternal:
         return storage.external.address() == other.storage.external.address();
       case Kind::kHeapObject:
       case Kind::kCompressedHeapObject:
         return storage.handle.address() == other.storage.handle.address();
-      case Kind::kDelayedString:
-        return storage.string == other.storage.string;
     }
   }
 };
 
-// Load loaded_rep from: base + offset.
-// For Kind::kOnHeap: base - kHeapObjectTag + offset
-// For Kind::kOnHeap, `base` has to be the object start.
-// For (u)int8/16, the value will be sign- or zero-extended to Word32.
-struct LoadOp : FixedArityOperationT<1, LoadOp> {
-  enum class Kind : uint8_t { kOnHeap, kRaw };
-  Kind kind;
-  MachineType loaded_rep;
-  int32_t offset;
-
-  static constexpr OpProperties properties = OpProperties::Reading();
-
-  OpIndex base() const { return input(0); }
-
-  LoadOp(OpIndex base, Kind kind, MachineType loaded_rep, int32_t offset)
-      : Base(base), kind(kind), loaded_rep(loaded_rep), offset(offset) {}
-  void PrintOptions(std::ostream& os) const;
-  auto options() const { return std::tuple{kind, loaded_rep, offset}; }
-};
-
 // Load `loaded_rep` from: base + offset + index * 2^element_size_log2.
-// For Kind::kOnHeap: subtract kHeapObjectTag,
-//                    `base` has to be the object start.
+// For Kind::tagged_base: subtract kHeapObjectTag,
+//                        `base` has to be the object start.
 // For (u)int8/16, the value will be sign- or zero-extended to Word32.
-struct IndexedLoadOp : FixedArityOperationT<2, IndexedLoadOp> {
-  using Kind = LoadOp::Kind;
+// When result_rep is RegisterRepresentation::Compressed(), then the load does
+// not decompress the value.
+struct LoadOp : OperationT<LoadOp> {
+  struct Kind {
+    // The `base` input is a tagged pointer to a HeapObject.
+    bool tagged_base : 1;
+    // The effective address might be unaligned.
+    bool maybe_unaligned : 1;
+    // There is a Wasm trap handler for out-of-bounds accesses.
+    bool with_trap_handler : 1;
+
+    static constexpr Kind TaggedBase() { return Kind{true, false, false}; }
+    static constexpr Kind RawAligned() { return Kind{false, false, false}; }
+    static constexpr Kind RawUnaligned() { return Kind{false, true, false}; }
+    static constexpr Kind Protected() { return Kind{false, false, true}; }
+
+    bool operator==(const Kind& other) const {
+      return tagged_base == other.tagged_base &&
+             maybe_unaligned == other.maybe_unaligned &&
+             with_trap_handler == other.with_trap_handler;
+    }
+  };
   Kind kind;
-  MachineType loaded_rep;
+  MemoryRepresentation loaded_rep;
+  RegisterRepresentation result_rep;
   uint8_t element_size_log2;  // multiply index with 2^element_size_log2
   int32_t offset;             // add offset to scaled index
 
-  static constexpr OpProperties properties = OpProperties::Reading();
+  OpProperties Properties() const {
+    return kind.with_trap_handler ? OpProperties::ReadingAndCanAbort()
+                                  : OpProperties::Reading();
+  }
 
   OpIndex base() const { return input(0); }
-  OpIndex index() const { return input(1); }
+  OpIndex index() const {
+    return input_count == 2 ? input(1) : OpIndex::Invalid();
+  }
 
-  IndexedLoadOp(OpIndex base, OpIndex index, Kind kind, MachineType loaded_rep,
-                int32_t offset, uint8_t element_size_log2)
-      : Base(base, index),
+  LoadOp(OpIndex base, OpIndex index, Kind kind,
+         MemoryRepresentation loaded_rep, RegisterRepresentation result_rep,
+         int32_t offset, uint8_t element_size_log2)
+      : Base(1 + index.valid()),
         kind(kind),
         loaded_rep(loaded_rep),
+        result_rep(result_rep),
         element_size_log2(element_size_log2),
-        offset(offset) {}
+        offset(offset) {
+    DCHECK(loaded_rep.ToRegisterRepresentation() == result_rep ||
+           (loaded_rep.IsTagged() &&
+            result_rep == RegisterRepresentation::Compressed()));
+    DCHECK_IMPLIES(element_size_log2 > 0, index.valid());
+    input(0) = base;
+    if (index.valid()) input(1) = index;
+  }
+  static LoadOp& New(Graph* graph, OpIndex base, OpIndex index, Kind kind,
+                     MemoryRepresentation loaded_rep,
+                     RegisterRepresentation result_rep, int32_t offset,
+                     uint8_t element_size_log2) {
+    return Base::New(graph, 1 + index.valid(), base, index, kind, loaded_rep,
+                     result_rep, offset, element_size_log2);
+  }
+  void PrintInputs(std::ostream& os, const std::string& op_index_prefix) const;
   void PrintOptions(std::ostream& os) const;
   auto options() const {
-    return std::tuple{kind, loaded_rep, element_size_log2, offset};
+    return std::tuple{kind, loaded_rep, result_rep, offset, element_size_log2};
   }
 };
 
-// Store `value` to: base + offset.
-// For Kind::kOnHeap: base - kHeapObjectTag + offset
-// For Kind::kOnHeap, `base` has to be the object start.
-struct StoreOp : FixedArityOperationT<2, StoreOp> {
-  enum class Kind : uint8_t { kOnHeap, kRaw };
-  Kind kind;
-  MachineRepresentation stored_rep;
-  WriteBarrierKind write_barrier;
-  int32_t offset;
+V8_INLINE size_t hash_value(LoadOp::Kind kind) {
+  return base::hash_value(static_cast<int>(kind.tagged_base) |
+                          (kind.maybe_unaligned << 1) |
+                          (kind.with_trap_handler << 2));
+}
 
-  static constexpr OpProperties properties = OpProperties::Writing();
+// Store `value` to: base + offset + index * 2^element_size_log2.
+// For Kind::tagged_base: subtract kHeapObjectTag,
+//                        `base` has to be the object start.
+struct StoreOp : OperationT<StoreOp> {
+  using Kind = LoadOp::Kind;
+  Kind kind;
+  MemoryRepresentation stored_rep;
+  WriteBarrierKind write_barrier;
+  uint8_t element_size_log2;  // multiply index with 2^element_size_log2
+  int32_t offset;             // add offset to scaled index
+
+  OpProperties Properties() const {
+    return kind.with_trap_handler ? OpProperties::WritingAndCanAbort()
+                                  : OpProperties::Writing();
+  }
 
   OpIndex base() const { return input(0); }
   OpIndex value() const { return input(1); }
-
-  StoreOp(OpIndex base, OpIndex value, Kind kind,
-          MachineRepresentation stored_rep, WriteBarrierKind write_barrier,
-          int32_t offset)
-      : Base(base, value),
-        kind(kind),
-        stored_rep(stored_rep),
-        write_barrier(write_barrier),
-        offset(offset) {}
-  void PrintOptions(std::ostream& os) const;
-  auto options() const {
-    return std::tuple{kind, stored_rep, write_barrier, offset};
+  OpIndex index() const {
+    return input_count == 3 ? input(2) : OpIndex::Invalid();
   }
-};
 
-// Store `value` to: base + offset + index * 2^element_size_log2.
-// For Kind::kOnHeap: subtract kHeapObjectTag,
-//                    `base` has to be the object start.
-struct IndexedStoreOp : FixedArityOperationT<3, IndexedStoreOp> {
-  using Kind = StoreOp::Kind;
-  Kind kind;
-  MachineRepresentation stored_rep;
-  WriteBarrierKind write_barrier;
-  uint8_t element_size_log2;  // multiply index with 2^element_size_log2
-  int32_t offset;             // add offset to scaled index
-
-  static constexpr OpProperties properties = OpProperties::Writing();
-
-  OpIndex base() const { return input(0); }
-  OpIndex index() const { return input(1); }
-  OpIndex value() const { return input(2); }
-
-  IndexedStoreOp(OpIndex base, OpIndex index, OpIndex value, Kind kind,
-                 MachineRepresentation stored_rep,
-                 WriteBarrierKind write_barrier, int32_t offset,
-                 uint8_t element_size_log2)
-      : Base(base, index, value),
+  StoreOp(OpIndex base, OpIndex index, OpIndex value, Kind kind,
+          MemoryRepresentation stored_rep, WriteBarrierKind write_barrier,
+          int32_t offset, uint8_t element_size_log2)
+      : Base(2 + index.valid()),
         kind(kind),
         stored_rep(stored_rep),
         write_barrier(write_barrier),
         element_size_log2(element_size_log2),
-        offset(offset) {}
+        offset(offset) {
+    DCHECK_IMPLIES(element_size_log2 > 0, index.valid());
+    input(0) = base;
+    input(1) = value;
+    if (index.valid()) input(2) = index;
+  }
+  static StoreOp& New(Graph* graph, OpIndex base, OpIndex index, OpIndex value,
+                      Kind kind, MemoryRepresentation stored_rep,
+                      WriteBarrierKind write_barrier, int32_t offset,
+                      uint8_t element_size_log2) {
+    return Base::New(graph, 2 + index.valid(), base, index, value, kind,
+                     stored_rep, write_barrier, offset, element_size_log2);
+  }
+
+  void PrintInputs(std::ostream& os, const std::string& op_index_prefix) const;
   void PrintOptions(std::ostream& os) const;
   auto options() const {
-    return std::tuple{kind, stored_rep, write_barrier, element_size_log2,
-                      offset};
+    return std::tuple{kind, stored_rep, write_barrier, offset,
+                      element_size_log2};
   }
+};
+
+// Retain a HeapObject to prevent it from being garbage collected too early.
+struct RetainOp : FixedArityOperationT<1, RetainOp> {
+  OpIndex retained() const { return input(0); }
+
+  // Retain doesn't actually write, it just keeps a value alive. However, since
+  // this must not be reordered with operations reading from the heap, we mark
+  // it as writing to prevent such reorderings.
+  static constexpr OpProperties properties = OpProperties::Writing();
+
+  explicit RetainOp(OpIndex retained) : Base(retained) {}
+  auto options() const { return std::tuple{}; }
 };
 
 struct StackPointerGreaterThanOp
@@ -1065,13 +1559,32 @@ struct StackPointerGreaterThanOp
   auto options() const { return std::tuple{kind}; }
 };
 
-struct LoadStackCheckOffsetOp
-    : FixedArityOperationT<0, LoadStackCheckOffsetOp> {
+// Allocate a piece of memory in the current stack frame. Every operation
+// in the IR is a separate stack slot, but repeated execution in a loop
+// produces the same stack slot.
+struct StackSlotOp : FixedArityOperationT<0, StackSlotOp> {
+  int size;
+  int alignment;
+
+  static constexpr OpProperties properties = OpProperties::Writing();
+
+  StackSlotOp(int size, int alignment) : size(size), alignment(alignment) {}
+  auto options() const { return std::tuple{size, alignment}; }
+};
+
+// Values that are constant for the current stack frame/invocation.
+// Therefore, they behaves like a constant, even though they are different for
+// every invocation.
+struct FrameConstantOp : FixedArityOperationT<0, FrameConstantOp> {
+  enum class Kind { kStackCheckOffset, kFramePointer, kParentFramePointer };
+  Kind kind;
+
   static constexpr OpProperties properties = OpProperties::Pure();
 
-  LoadStackCheckOffsetOp() : Base() {}
-  auto options() const { return std::tuple{}; }
+  explicit FrameConstantOp(Kind kind) : Base(), kind(kind) {}
+  auto options() const { return std::tuple{kind}; }
 };
+std::ostream& operator<<(std::ostream& os, FrameConstantOp::Kind kind);
 
 struct FrameStateOp : OperationT<FrameStateOp> {
   bool inlined;
@@ -1089,8 +1602,8 @@ struct FrameStateOp : OperationT<FrameStateOp> {
     return result;
   }
 
-  explicit FrameStateOp(base::Vector<const OpIndex> inputs, bool inlined,
-                        const FrameStateData* data)
+  FrameStateOp(base::Vector<const OpIndex> inputs, bool inlined,
+               const FrameStateData* data)
       : Base(inputs), inlined(inlined), data(data) {}
   void PrintOptions(std::ostream& os) const;
   auto options() const { return std::tuple{inlined, data}; }
@@ -1100,7 +1613,7 @@ struct FrameStateOp : OperationT<FrameStateOp> {
 // Semantically, it deopts if the current code object has been
 // deoptimized. But this might also be implemented differently.
 struct CheckLazyDeoptOp : FixedArityOperationT<2, CheckLazyDeoptOp> {
-  static constexpr OpProperties properties = OpProperties::CanDeopt();
+  static constexpr OpProperties properties = OpProperties::CanAbort();
 
   OpIndex call() const { return input(0); }
   OpIndex frame_state() const { return input(1); }
@@ -1126,7 +1639,7 @@ struct DeoptimizeIfOp : FixedArityOperationT<2, DeoptimizeIfOp> {
   bool negated;
   const DeoptimizeParameters* parameters;
 
-  static constexpr OpProperties properties = OpProperties::CanDeopt();
+  static constexpr OpProperties properties = OpProperties::CanAbort();
 
   OpIndex condition() const { return input(0); }
   OpIndex frame_state() const { return input(1); }
@@ -1139,6 +1652,19 @@ struct DeoptimizeIfOp : FixedArityOperationT<2, DeoptimizeIfOp> {
   auto options() const { return std::tuple{negated, parameters}; }
 };
 
+struct TrapIfOp : FixedArityOperationT<1, TrapIfOp> {
+  bool negated;
+  const TrapId trap_id;
+
+  static constexpr OpProperties properties = OpProperties::CanAbort();
+
+  OpIndex condition() const { return input(0); }
+
+  TrapIfOp(OpIndex condition, bool negated, const TrapId trap_id)
+      : Base(condition), negated(negated), trap_id(trap_id) {}
+  auto options() const { return std::tuple{negated, trap_id}; }
+};
+
 struct ParameterOp : FixedArityOperationT<0, ParameterOp> {
   int32_t parameter_index;
   const char* debug_name;
@@ -1149,6 +1675,15 @@ struct ParameterOp : FixedArityOperationT<0, ParameterOp> {
       : Base(), parameter_index(parameter_index), debug_name(debug_name) {}
   auto options() const { return std::tuple{parameter_index, debug_name}; }
   void PrintOptions(std::ostream& os) const;
+};
+
+struct OsrValueOp : FixedArityOperationT<0, OsrValueOp> {
+  int32_t index;
+
+  static constexpr OpProperties properties = OpProperties::Pure();
+
+  explicit OsrValueOp(int32_t index) : Base(), index(index) {}
+  auto options() const { return std::tuple{index}; }
 };
 
 struct CallOp : OperationT<CallOp> {
@@ -1177,6 +1712,33 @@ struct CallOp : OperationT<CallOp> {
   auto options() const { return std::tuple{descriptor}; }
 };
 
+struct TailCallOp : OperationT<TailCallOp> {
+  const CallDescriptor* descriptor;
+
+  static constexpr OpProperties properties =
+      OpProperties::BlockTerminatorWithAnySideEffect();
+
+  OpIndex callee() const { return input(0); }
+  base::Vector<const OpIndex> arguments() const {
+    return inputs().SubVector(1, input_count);
+  }
+
+  TailCallOp(OpIndex callee, base::Vector<const OpIndex> arguments,
+             const CallDescriptor* descriptor)
+      : Base(1 + arguments.size()), descriptor(descriptor) {
+    base::Vector<OpIndex> inputs = this->inputs();
+    inputs[0] = callee;
+    inputs.SubVector(1, inputs.size()).OverwriteWith(arguments);
+  }
+  static TailCallOp& New(Graph* graph, OpIndex callee,
+                         base::Vector<const OpIndex> arguments,
+                         const CallDescriptor* descriptor) {
+    return Base::New(graph, 1 + arguments.size(), callee, arguments,
+                     descriptor);
+  }
+  auto options() const { return std::tuple{descriptor}; }
+};
+
 // Control-flow should never reach here.
 struct UnreachableOp : FixedArityOperationT<0, UnreachableOp> {
   static constexpr OpProperties properties = OpProperties::BlockTerminator();
@@ -1186,15 +1748,26 @@ struct UnreachableOp : FixedArityOperationT<0, UnreachableOp> {
 };
 
 struct ReturnOp : OperationT<ReturnOp> {
-  int32_t pop_count;
-
   static constexpr OpProperties properties = OpProperties::BlockTerminator();
 
-  base::Vector<const OpIndex> return_values() const { return inputs(); }
+  // Number of additional stack slots to be removed.
+  OpIndex pop_count() const { return input(0); }
 
-  ReturnOp(base::Vector<const OpIndex> return_values, int32_t pop_count)
-      : Base(return_values), pop_count(pop_count) {}
-  auto options() const { return std::tuple{pop_count}; }
+  base::Vector<const OpIndex> return_values() const {
+    return inputs().SubVector(1, input_count);
+  }
+
+  ReturnOp(OpIndex pop_count, base::Vector<const OpIndex> return_values)
+      : Base(1 + return_values.size()) {
+    base::Vector<OpIndex> inputs = this->inputs();
+    inputs[0] = pop_count;
+    inputs.SubVector(1, inputs.size()).OverwriteWith(return_values);
+  }
+  static ReturnOp& New(Graph* graph, OpIndex pop_count,
+                       base::Vector<const OpIndex> return_values) {
+    return Base::New(graph, 1 + return_values.size(), pop_count, return_values);
+  }
+  auto options() const { return std::tuple{}; }
 };
 
 struct GotoOp : FixedArityOperationT<0, GotoOp> {
@@ -1219,6 +1792,23 @@ struct BranchOp : FixedArityOperationT<1, BranchOp> {
   auto options() const { return std::tuple{if_true, if_false}; }
 };
 
+// `CatchExceptionOp` has to follow a `CallOp` with a subsequent
+// `CheckLazyDeoptOp`. It provides the exception value, which might only be used
+// from the `if_exception` successor.
+struct CatchExceptionOp : FixedArityOperationT<1, CatchExceptionOp> {
+  Block* if_success;
+  Block* if_exception;
+
+  static constexpr OpProperties properties = OpProperties::BlockTerminator();
+
+  OpIndex call() const { return input(0); }
+
+  explicit CatchExceptionOp(OpIndex call, Block* if_success,
+                            Block* if_exception)
+      : Base(call), if_success(if_success), if_exception(if_exception) {}
+  auto options() const { return std::tuple{if_success, if_exception}; }
+};
+
 struct SwitchOp : FixedArityOperationT<1, SwitchOp> {
   struct Case {
     int32_t value;
@@ -1226,9 +1816,7 @@ struct SwitchOp : FixedArityOperationT<1, SwitchOp> {
 
     Case(int32_t value, Block* destination)
         : value(value), destination(destination) {}
-    friend size_t hash_value(Case v) {
-      return base::hash_combine(v.value, v.destination);
-    }
+
     bool operator==(const Case& other) const {
       return value == other.value && destination == other.destination;
     }
@@ -1246,25 +1834,39 @@ struct SwitchOp : FixedArityOperationT<1, SwitchOp> {
   auto options() const { return std::tuple{cases, default_case}; }
 };
 
+template <>
+struct fast_hash<SwitchOp::Case> {
+  size_t operator()(SwitchOp::Case v) {
+    return fast_hash_combine(v.value, v.destination);
+  }
+};
+
+// Tuples are only used to lower operations with multiple outputs.
+// `TupleOp` should be folded away by subsequent `ProjectionOp`s.
+struct TupleOp : OperationT<TupleOp> {
+  static constexpr OpProperties properties = OpProperties::Pure();
+
+  explicit TupleOp(base::Vector<const OpIndex> inputs) : Base(inputs) {}
+  auto options() const { return std::tuple{}; }
+};
+
 // For operations that produce multiple results, we use `ProjectionOp` to
 // distinguish them.
 struct ProjectionOp : FixedArityOperationT<1, ProjectionOp> {
-  enum class Kind { kResult, kOverflowBit };
-  Kind kind;
+  uint16_t index;
 
   static constexpr OpProperties properties = OpProperties::Pure();
 
   OpIndex input() const { return Base::input(0); }
 
-  ProjectionOp(OpIndex input, Kind kind) : Base(input), kind(kind) {}
-  auto options() const { return std::tuple{kind}; }
+  ProjectionOp(OpIndex input, uint16_t index) : Base(input), index(index) {}
+  auto options() const { return std::tuple{index}; }
 };
 
-std::ostream& operator<<(std::ostream& os, ProjectionOp::Kind kind);
-
-#define OPERATION_PROPERTIES_CASE(Name) Name##Op::properties,
-static constexpr OpProperties kOperationPropertiesTable[kNumberOfOpcodes] = {
-    TURBOSHAFT_OPERATION_LIST(OPERATION_PROPERTIES_CASE)};
+#define OPERATION_PROPERTIES_CASE(Name) Name##Op::PropertiesIfStatic(),
+static constexpr base::Optional<OpProperties>
+    kOperationPropertiesTable[kNumberOfOpcodes] = {
+        TURBOSHAFT_OPERATION_LIST(OPERATION_PROPERTIES_CASE)};
 #undef OPERATION_PROPERTIES_CASE
 
 template <class Op>
@@ -1296,13 +1898,6 @@ constexpr size_t kOperationSizeDividedBySizeofOpIndexTable[kNumberOfOpcodes] = {
 #undef OPERATION_SIZE
 };
 
-inline base::Vector<OpIndex> Operation::inputs() {
-  // This is actually undefined behavior, since we use the `this` pointer to
-  // access an adjacent object.
-  OpIndex* ptr = reinterpret_cast<OpIndex*>(
-      reinterpret_cast<char*>(this) + kOperationSizeTable[OpcodeIndex(opcode)]);
-  return {ptr, input_count};
-}
 inline base::Vector<const OpIndex> Operation::inputs() const {
   // This is actually undefined behavior, since we use the `this` pointer to
   // access an adjacent object.
@@ -1312,15 +1907,25 @@ inline base::Vector<const OpIndex> Operation::inputs() const {
   return {ptr, input_count};
 }
 
-inline const OpProperties& Operation::properties() const {
-  return kOperationPropertiesTable[OpcodeIndex(opcode)];
+inline OpProperties Operation::Properties() const {
+  if (auto prop = kOperationPropertiesTable[OpcodeIndex(opcode)]) {
+    return *prop;
+  }
+  switch (opcode) {
+    case Opcode::kLoad:
+      return Cast<LoadOp>().Properties();
+    case Opcode::kStore:
+      return Cast<StoreOp>().Properties();
+    default:
+      UNREACHABLE();
+  }
 }
 
 // static
 inline size_t Operation::StorageSlotCount(Opcode opcode, size_t input_count) {
   size_t size = kOperationSizeDividedBySizeofOpIndexTable[OpcodeIndex(opcode)];
   constexpr size_t r = sizeof(OperationStorageSlot) / sizeof(OpIndex);
-  STATIC_ASSERT(sizeof(OperationStorageSlot) % sizeof(OpIndex) == 0);
+  static_assert(sizeof(OperationStorageSlot) % sizeof(OpIndex) == 0);
   return std::max<size_t>(2, (r - 1 + size + input_count) / r);
 }
 

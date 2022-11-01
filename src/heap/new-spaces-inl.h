@@ -9,6 +9,7 @@
 #include "src/common/globals.h"
 #include "src/heap/heap.h"
 #include "src/heap/new-spaces.h"
+#include "src/heap/paged-spaces-inl.h"
 #include "src/heap/spaces-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/tagged-impl.h"
@@ -38,35 +39,29 @@ bool SemiSpace::ContainsSlow(Address a) const {
 }
 
 // --------------------------------------------------------------------------
-// NewSpaceBase
+// NewSpace
 
-bool NewSpaceBase::Contains(Object o) const {
+bool NewSpace::Contains(Object o) const {
   return o.IsHeapObject() && Contains(HeapObject::cast(o));
 }
 
-bool NewSpaceBase::Contains(HeapObject o) const {
+bool NewSpace::Contains(HeapObject o) const {
   return BasicMemoryChunk::FromHeapObject(o)->InNewSpace();
 }
 
-V8_WARN_UNUSED_RESULT inline AllocationResult
-NewSpaceBase::AllocateRawSynchronized(int size_in_bytes,
-                                      AllocationAlignment alignment,
-                                      AllocationOrigin origin) {
+V8_WARN_UNUSED_RESULT inline AllocationResult NewSpace::AllocateRawSynchronized(
+    int size_in_bytes, AllocationAlignment alignment, AllocationOrigin origin) {
   base::MutexGuard guard(&mutex_);
   return AllocateRaw(size_in_bytes, alignment, origin);
 }
 
 // -----------------------------------------------------------------------------
-// NewSpace
+// SemiSpaceNewSpace
 
-bool NewSpace::ContainsSlow(Address a) const {
-  return from_space_.ContainsSlow(a) || to_space_.ContainsSlow(a);
-}
-
-V8_INLINE bool NewSpace::EnsureAllocation(int size_in_bytes,
-                                          AllocationAlignment alignment,
-                                          AllocationOrigin origin,
-                                          int* out_max_aligned_size) {
+V8_INLINE bool SemiSpaceNewSpace::EnsureAllocation(
+    int size_in_bytes, AllocationAlignment alignment, AllocationOrigin origin,
+    int* out_max_aligned_size) {
+  size_in_bytes = ALIGN_TO_ALLOCATION_ALIGNMENT(size_in_bytes);
   DCHECK_SEMISPACE_ALLOCATION_INFO(allocation_info_, to_space_);
 #if DEBUG
   VerifyTop();
@@ -74,7 +69,7 @@ V8_INLINE bool NewSpace::EnsureAllocation(int size_in_bytes,
 
   AdvanceAllocationObservers();
 
-  Address old_top = allocation_info_->top();
+  Address old_top = allocation_info_.top();
   Address high = to_space_.page_high();
   int filler_size = Heap::GetFillToAlign(old_top, alignment);
   int aligned_size_in_bytes = size_in_bytes + filler_size;
@@ -83,12 +78,12 @@ V8_INLINE bool NewSpace::EnsureAllocation(int size_in_bytes,
     // Not enough room in the page, try to allocate a new one.
     if (!AddFreshPage()) {
       // When we cannot grow NewSpace anymore we query for parked allocations.
-      if (!FLAG_allocation_buffer_parking ||
+      if (!v8_flags.allocation_buffer_parking ||
           !AddParkedAllocationBuffer(size_in_bytes, alignment))
         return false;
     }
 
-    old_top = allocation_info_->top();
+    old_top = allocation_info_.top();
     high = to_space_.page_high();
     filler_size = Heap::GetFillToAlign(old_top, alignment);
     aligned_size_in_bytes = size_in_bytes + filler_size;
@@ -100,30 +95,43 @@ V8_INLINE bool NewSpace::EnsureAllocation(int size_in_bytes,
 
   DCHECK(old_top + aligned_size_in_bytes <= high);
   UpdateInlineAllocationLimit(aligned_size_in_bytes);
-  DCHECK_EQ(allocation_info_->start(), allocation_info_->top());
+  DCHECK_EQ(allocation_info_.start(), allocation_info_.top());
   DCHECK_SEMISPACE_ALLOCATION_INFO(allocation_info_, to_space_);
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// PagedSpaceForNewSpace
+
+V8_INLINE bool PagedSpaceForNewSpace::EnsureAllocation(
+    int size_in_bytes, AllocationAlignment alignment, AllocationOrigin origin,
+    int* out_max_aligned_size) {
+  if (!PagedSpaceBase::EnsureAllocation(size_in_bytes, alignment, origin,
+                                        out_max_aligned_size)) {
+    return false;
+  }
+  allocated_linear_areas_ += limit() - top();
   return true;
 }
 
 // -----------------------------------------------------------------------------
 // SemiSpaceObjectIterator
 
+SemiSpaceObjectIterator::SemiSpaceObjectIterator(const SemiSpaceNewSpace* space)
+    : current_(space->first_allocatable_address()) {}
+
 HeapObject SemiSpaceObjectIterator::Next() {
-  while (current_ != limit_) {
+  while (true) {
     if (Page::IsAlignedToPageSize(current_)) {
       Page* page = Page::FromAllocationAreaAddress(current_);
       page = page->next_page();
-      DCHECK(page);
+      if (page == nullptr) return HeapObject();
       current_ = page->area_start();
-      if (current_ == limit_) return HeapObject();
     }
     HeapObject object = HeapObject::FromAddress(current_);
-    current_ += object.Size();
-    if (!object.IsFreeSpaceOrFiller()) {
-      return object;
-    }
+    current_ += ALIGN_TO_ALLOCATION_ALIGNMENT(object.Size());
+    if (!object.IsFreeSpaceOrFiller()) return object;
   }
-  return HeapObject();
 }
 
 }  // namespace internal

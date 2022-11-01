@@ -142,8 +142,6 @@ from testrunner.objects.output import Output, NULL_OUTPUT
 
 SUPPORTED_ARCHS = ['arm',
                    'ia32',
-                   'mips',
-                   'mipsel',
                    'x64',
                    'arm64',
                    'riscv64']
@@ -871,7 +869,7 @@ class AndroidPlatform(Platform):  # pragma: no cover
 
   def __init__(self, args):
     super(AndroidPlatform, self).__init__(args)
-    self.driver = android.android_driver(args.device)
+    self.driver = android.Driver.instance(args.device)
 
   def PreExecution(self):
     self.driver.set_high_perf_mode()
@@ -1241,7 +1239,7 @@ def Main(argv):
       try:
         for runnable in FlattenRunnables(root, NodeCB):
           runnable_name = '/'.join(runnable.graphs)
-          if args.filter and args.filter.search(runnable_name):
+          if args.filter and not args.filter.match(runnable_name):
             logging.info('Skipping suite "%s" due to filter', runnable_name)
             continue
           logging.info('>>> Running suite: %s', runnable_name)

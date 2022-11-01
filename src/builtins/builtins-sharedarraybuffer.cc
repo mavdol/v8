@@ -55,7 +55,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<JSTypedArray> ValidateIntegerTypedArray(
   if (object->IsJSTypedArray()) {
     Handle<JSTypedArray> typed_array = Handle<JSTypedArray>::cast(object);
 
-    if (typed_array->WasDetached()) {
+    if (typed_array->IsDetachedOrOutOfBounds()) {
       THROW_NEW_ERROR(
           isolate,
           NewTypeError(
@@ -231,7 +231,9 @@ Object DoWait(Isolate* isolate, FutexEmulation::WaitMode mode,
   if (mode == FutexEmulation::WaitMode::kSync &&
       !isolate->allow_atomics_wait()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewTypeError(MessageTemplate::kAtomicsWaitNotAllowed));
+        isolate, NewTypeError(MessageTemplate::kAtomicsOperationNotAllowed,
+                              isolate->factory()->NewStringFromAsciiChecked(
+                                  "Atomics.wait")));
   }
 
   Handle<JSArrayBuffer> array_buffer = sta->GetBuffer();

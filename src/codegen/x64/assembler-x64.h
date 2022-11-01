@@ -59,6 +59,7 @@ namespace v8 {
 namespace internal {
 
 class SafepointTableBuilder;
+class MaglevSafepointTableBuilder;
 
 // Utility functions
 
@@ -408,7 +409,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // otherwise valid instructions.)
   // This allows for a single, fast space check per instruction.
   static constexpr int kGap = 32;
-  STATIC_ASSERT(AssemblerBase::kMinimalBufferSize >= 2 * kGap);
+  static_assert(AssemblerBase::kMinimalBufferSize >= 2 * kGap);
 
  public:
   // Create an assembler. Instructions and relocation information are emitted
@@ -424,9 +425,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
   static constexpr int kNoHandlerTable = 0;
-  static constexpr SafepointTableBuilder* kNoSafepointTable = nullptr;
+  static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
+
   void GetCode(Isolate* isolate, CodeDesc* desc,
-               SafepointTableBuilder* safepoint_table_builder,
+               SafepointTableBuilderBase* safepoint_table_builder,
                int handler_table_offset);
 
   // Convenience wrapper for code without safepoint or handler tables.
@@ -453,6 +455,11 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
   static inline int32_t relative_target_offset(Address target, Address pc);
 
+  // During code generation builtin targets in PC-relative call/jump
+  // instructions are temporarily encoded as builtin ID until the generated
+  // code is moved into the code space.
+  static inline Builtin target_builtin_at(Address pc);
+
   // This sets the branch destination (which is in the instruction on x64).
   // This is for calls and branches within generated code.
   inline static void deserialization_set_special_target_at(
@@ -469,7 +476,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   inline Handle<CodeT> code_target_object_handle_at(Address pc);
   inline Handle<HeapObject> compressed_embedded_object_handle_at(Address pc);
-  inline Address runtime_entry_at(Address pc);
 
   // Number of bytes taken up by the branch target in the code.
   static constexpr int kSpecialTargetSize = 4;  // 32-bit displacement.
@@ -537,6 +543,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // to a mulitple of m. m must be a power of 2 (>= 2).
   void DataAlign(int m);
   void Nop(int bytes = 1);
+
+  void emit_trace_instruction(Immediate markid);
+
   // Aligns code to something that's optimal for a jump target for the platform.
   void CodeTargetAlign();
   void LoopHeaderAlign();
@@ -583,8 +592,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // the embedded object gets already recorded correctly when emitting the dummy
   // move.
   void movq_heap_number(Register dst, double value);
-
-  void movq_string(Register dst, const StringConstantBase* str);
 
   // Loads a 64-bit immediate into a register, potentially using the constant
   // pool.
@@ -702,6 +709,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void mull(Operand src);
   // Multiply rax by src, put the result in rdx:rax.
   void mulq(Register src);
+  void mulq(Operand src);
 
 #define DECLARE_SHIFT_INSTRUCTION(instruction, subcode)                     \
   void instruction##l(Register dst, Immediate imm8) {                       \
@@ -807,13 +815,13 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // Calls
   // Call near relative 32-bit displacement, relative to next instruction.
   void call(Label* L);
-  void call(Address entry, RelocInfo::Mode rmode);
 
   // Explicitly emit a near call / near jump. The displacement is relative to
   // the next instructions (which starts at {pc_offset() + kNearJmpInstrSize}).
   static constexpr int kNearJmpInstrSize = 5;
   void near_call(intptr_t disp, RelocInfo::Mode rmode);
   void near_jmp(intptr_t disp, RelocInfo::Mode rmode);
+  void near_j(Condition cc, intptr_t disp, RelocInfo::Mode rmode);
 
   void call(Handle<CodeT> target,
             RelocInfo::Mode rmode = RelocInfo::CODE_TARGET);
@@ -827,7 +835,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // Unconditional jump to L
   void jmp(Label* L, Label::Distance distance = Label::kFar);
   void jmp(Handle<CodeT> target, RelocInfo::Mode rmode);
-  void jmp(Address entry, RelocInfo::Mode rmode);
 
   // Jump near absolute indirect (r64)
   void jmp(Register adr);
@@ -2108,6 +2115,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
  private:
   Address addr_at(int pos) {
+    DCHECK_GE(pos, 0);
+    DCHECK_LT(pos, pc_offset());
     return reinterpret_cast<Address>(buffer_start_ + pos);
   }
   uint32_t long_at(int pos) {
@@ -2124,7 +2133,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   inline void emitl(uint32_t x);
   inline void emitq(uint64_t x);
   inline void emitw(uint16_t x);
-  inline void emit_runtime_entry(Address entry, RelocInfo::Mode rmode);
   inline void emit(Immediate x);
   inline void emit(Immediate64 x);
 
@@ -2550,9 +2558,12 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
   bool is_optimizable_farjmp(int idx);
 
-  void AllocateAndInstallRequestedHeapObjects(Isolate* isolate);
+  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
 
   int WriteCodeComments();
+
+  void GetCode(Isolate* isolate, CodeDesc* desc, int safepoint_table_offset,
+               int handler_table_offset);
 
   friend class EnsureSpace;
   friend class RegExpMacroAssemblerX64;

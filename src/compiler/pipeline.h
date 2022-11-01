@@ -11,7 +11,6 @@
 // Do not include anything from src/compiler here!
 #include "src/common/globals.h"
 #include "src/objects/code.h"
-#include "src/objects/objects.h"
 
 namespace v8 {
 namespace internal {
@@ -50,8 +49,7 @@ class Pipeline : public AllStatic {
   static V8_EXPORT_PRIVATE std::unique_ptr<TurbofanCompilationJob>
   NewCompilationJob(Isolate* isolate, Handle<JSFunction> function,
                     CodeKind code_kind, bool has_script,
-                    BytecodeOffset osr_offset = BytecodeOffset::None(),
-                    JavaScriptFrame* osr_frame = nullptr);
+                    BytecodeOffset osr_offset = BytecodeOffset::None());
 
   // Run the pipeline for the WebAssembly compilation info.
   static void GenerateCodeForWasmFunction(
@@ -102,7 +100,7 @@ class Pipeline : public AllStatic {
       const AssemblerOptions& options, Schedule* schedule = nullptr);
 
   // Run just the register allocator phases.
-  V8_EXPORT_PRIVATE static bool AllocateRegistersForTesting(
+  V8_EXPORT_PRIVATE static void AllocateRegistersForTesting(
       const RegisterConfiguration* config, InstructionSequence* sequence,
       bool use_fast_register_allocator, bool run_verifier);
 

@@ -137,7 +137,7 @@ enum SoftwareInterruptCodes {
 //   debugger.
 const uint32_t kMaxWatchpointCode = 31;
 const uint32_t kMaxStopCode = 127;
-STATIC_ASSERT(kMaxWatchpointCode < kMaxStopCode);
+static_assert(kMaxWatchpointCode < kMaxStopCode);
 
 // ----- Fields offset and length.
 const int kRjShift = 5;
@@ -693,7 +693,8 @@ inline Hint NegateHint(Hint hint) { return no_hint; }
 // registers and other constants.
 
 // Break 0xfffff, reserved for redirected real time call.
-const Instr rtCallRedirInstr = BREAK | call_rt_redirected;
+const Instr rtCallRedirInstr =
+    static_cast<uint32_t>(BREAK) | call_rt_redirected;
 // A nop instruction. (Encoding of addi_w 0 0 0).
 const Instr nopInstr = ADDI_W;
 
@@ -1276,7 +1277,8 @@ InstructionBase::Type InstructionBase::InstructionType() const {
 
 template <class P>
 bool InstructionGetters<P>::IsTrap() const {
-  return true;
+  if ((this->Bits(31, 15) << 15) == BREAK) return true;
+  return false;
 }
 
 }  // namespace internal

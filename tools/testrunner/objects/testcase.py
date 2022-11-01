@@ -290,7 +290,7 @@ class TestCase(object):
   def only_standard_variant(self):
     return statusfile.NO_VARIANTS in self._statusfile_outcomes
 
-  def get_command(self):
+  def get_command(self, ctx):
     params = self._get_cmd_params()
     env = self._get_cmd_env()
     shell = self.get_shell()
@@ -298,11 +298,17 @@ class TestCase(object):
       shell += '.exe'
     shell_flags = self._get_shell_flags()
     timeout = self._get_timeout(params)
-    return self._create_cmd(shell, shell_flags + params, env, timeout)
+    return self._create_cmd(ctx, shell, shell_flags + params, env, timeout)
 
   def _get_cmd_params(self):
-    """Gets command parameters and combines them in the following order:
+    """Gets all command parameters and combines them in the following order:
       - files [empty by default]
+      - all flags
+    """
+    return (self._get_files_params() + self.get_flags())
+
+  def get_flags(self):
+    """Gets all flags and combines them in the following order:
       - random seed
       - mode flags (based on chosen mode)
       - extra flags (from command line)
@@ -315,7 +321,6 @@ class TestCase(object):
     methods for getting partial parameters.
     """
     return (
-        self._get_files_params() +
         self._get_random_seed_flags() +
         self._get_mode_flags() +
         self._get_extra_flags() +
@@ -368,8 +373,6 @@ class TestCase(object):
 
   def _get_timeout(self, params):
     timeout = self._test_config.timeout
-    if "--stress-opt" in params:
-      timeout *= 4
     if "--jitless" in params:
       timeout *= 2
     if "--no-turbofan" in params:
@@ -388,16 +391,16 @@ class TestCase(object):
   def _get_suffix(self):
     return '.js'
 
-  def _create_cmd(self, shell, params, env, timeout):
-    return command.Command(
-      cmd_prefix=self._test_config.command_prefix,
-      shell=os.path.abspath(os.path.join(self._test_config.shell_dir, shell)),
-      args=params,
-      env=env,
-      timeout=timeout,
-      verbose=self._test_config.verbose,
-      resources_func=self._get_resources,
-      handle_sigterm=True,
+  def _create_cmd(self, ctx, shell, params, env, timeout):
+    return ctx.command(
+        cmd_prefix=self._test_config.command_prefix,
+        shell=os.path.abspath(os.path.join(self._test_config.shell_dir, shell)),
+        args=params,
+        env=env,
+        timeout=timeout,
+        verbose=self._test_config.verbose,
+        resources_func=self._get_resources,
+        handle_sigterm=True,
     )
 
   def _parse_source_flags(self, source=None):
@@ -444,8 +447,12 @@ class TestCase(object):
         (other.suite.name, other.name, other.variant)
     )
 
-  def __str__(self):
+  @property
+  def full_name(self):
     return self.suite.name + '/' + self.name
+
+  def __str__(self):
+    return self.full_name
 
 
 class D8TestCase(TestCase):
